@@ -36,7 +36,6 @@ export default function App() {
   const pendingConfirmation = useAppStore((s) => s.pendingConfirmation);
   const setPendingConfirmation = useAppStore((s) => s.setPendingConfirmation);
   const sendMessage = useAppStore((s) => s.sendMessage);
-  const addMessage = useAppStore((s) => s.addMessage);
 
   const isConnected = connectionStatus === "connected";
   const isRunning = runStatus === "running";
@@ -59,17 +58,15 @@ export default function App() {
     if (text.startsWith("/")) {
       const action = mapCommand(text);
       if (action) {
-        addMessage({ timestamp: new Date().toISOString(), type: "system", content: `> ${text}` });
         sendMessage({ type: "quick_action", action, request_id: id });
         setInput("");
         return;
       }
     }
 
-    addMessage({ timestamp: new Date().toISOString(), type: "system", content: `> ${text}` });
     sendMessage({ type: "prompt", text, request_id: id });
     setInput("");
-  }, [input, sendMessage, addMessage]);
+  }, [input, sendMessage]);
 
   const handleStop = useCallback(() => {
     if (sendMessage) sendMessage({ type: "stop" });

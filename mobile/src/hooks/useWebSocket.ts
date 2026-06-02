@@ -13,6 +13,7 @@ export function useWebSocket() {
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
+  const thinkingIdRef = useRef<string | null>(null);
 
   const {
     backendUrl,
@@ -22,6 +23,7 @@ export function useWebSocket() {
     setRunId,
     setServerModel,
     addMessage,
+    removeMessage,
     clearMessages,
     setPendingConfirmation,
     setSendMessage,
@@ -47,11 +49,6 @@ export function useWebSocket() {
           setConnectionStatus("connected");
           setServerModel(data.model);
           setSendMessage(sendJson);
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "system",
-            content: `Connected to server. Model: ${data.model}`,
-          });
           reconnectAttempts.current = 0;
           break;
 
@@ -64,14 +61,19 @@ export function useWebSocket() {
           setConnectionStatus("disconnected");
           break;
 
-        case "term":
-          // Raw terminal output — display as-is
+        case "term": {
+          // Remove thinking indicator on first real output (skip blank/whitespace-only chunks)
+          if (thinkingIdRef.current && data.text.trim().length > 0) {
+            removeMessage(thinkingIdRef.current);
+            thinkingIdRef.current = null;
+          }
           addMessage({
             timestamp: new Date().toISOString(),
             type: "term",
             content: data.text,
           });
           break;
+        }
 
         case "status":
           setRunStatus(data.running ? "running" : "idle");
@@ -81,6 +83,12 @@ export function useWebSocket() {
         case "run_started":
           setRunStatus("running");
           setRunId(data.run_id);
+          // Show thinking indicator until first output arrives
+          thinkingIdRef.current = addMessage({
+            timestamp: new Date().toISOString(),
+            type: "thinking",
+            content: "Thinking…",
+          });
           break;
 
         case "agent_output": {
@@ -107,31 +115,28 @@ export function useWebSocket() {
         case "run_completed":
           setRunStatus("completed");
           setRunId(null);
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "system",
-            content: `✓ Completed in ${(data.duration_ms / 1000).toFixed(1)}s, ${data.num_turns} turns`,
-          });
+          if (thinkingIdRef.current) {
+            removeMessage(thinkingIdRef.current);
+            thinkingIdRef.current = null;
+          }
           break;
 
         case "run_stopped":
           setRunStatus("stopped");
           setRunId(null);
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "system",
-            content: `⏹ Stopped (${data.reason})`,
-          });
+          if (thinkingIdRef.current) {
+            removeMessage(thinkingIdRef.current);
+            thinkingIdRef.current = null;
+          }
           break;
 
         case "run_failed":
           setRunStatus("failed");
           setRunId(null);
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "error",
-            content: `✗ Failed: ${data.error}`,
-          });
+          if (thinkingIdRef.current) {
+            removeMessage(thinkingIdRef.current);
+            thinkingIdRef.current = null;
+          }
           break;
 
         case "confirmation_required":
@@ -159,7 +164,7 @@ export function useWebSocket() {
           break;
       }
     },
-    [setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, setPendingConfirmation, setSendMessage, sendJson]
+    [setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, removeMessage, setPendingConfirmation, setSendMessage, sendJson]
   );
 
   const connect = useCallback(() => {

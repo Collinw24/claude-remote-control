@@ -88,7 +88,8 @@ function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId:
 
   logger.info("Launching Claude", { runId, requestId, prompt: prompt.slice(0, 200) });
 
-  sendTerm(ws, `\x1b[1m> ${prompt}\x1b[0m\n\n`);
+  // Echo the prompt — server is the single source of truth for display
+  sendTerm(ws, `\x1b[1m> ${prompt}\x1b[0m\n`);
   send(ws, { type: "run_started", request_id: requestId, run_id: runId, timestamp: new Date().toISOString() });
 
   const child = spawnClaude(prompt);

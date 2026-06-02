@@ -38,7 +38,8 @@ interface AppState {
 
   // Output log
   messages: LogEntry[];
-  addMessage: (entry: Omit<LogEntry, "id">) => void;
+  addMessage: (entry: Omit<LogEntry, "id">) => string;
+  removeMessage: (id: string) => void;
   clearMessages: () => void;
 
   // Confirmation dialog
@@ -69,9 +70,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Output log
   messages: [],
-  addMessage: (entry) =>
+  addMessage: (entry) => {
+    const id = uid();
     set((s) => ({
-      messages: [...s.messages, { ...entry, id: uid() }],
+      messages: [...s.messages, { ...entry, id }],
+    }));
+    return id;
+  },
+  removeMessage: (id) =>
+    set((s) => ({
+      messages: s.messages.filter((m) => m.id !== id),
     })),
   clearMessages: () => set({ messages: [] }),
 
