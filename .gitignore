@@ -1,0 +1,27 @@
+# Environment — contains API keys, NEVER commit
+.env
+server/.env
+
+# Dependencies
+node_modules/
+server/node_modules/
+mobile/node_modules/
+
+# Build output
+server/dist/
+mobile/dist/
+
+# Expo
+mobile/.expo/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+server/server.log
