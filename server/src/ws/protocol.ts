@@ -10,7 +10,7 @@ export const AuthMessage = z.object({
 export const PromptMessage = z.object({
   type: z.literal("prompt"),
   text: z.string().min(1, "Prompt text is required"),
-  request_id: z.string().uuid(),
+  request_id: z.string().min(1, "request_id is required"),
 });
 
 export const QuickActionMessage = z.object({
@@ -23,7 +23,7 @@ export const QuickActionMessage = z.object({
     "commit",
     "revert",
   ]),
-  request_id: z.string().uuid(),
+  request_id: z.string().min(1, "request_id is required"),
 });
 
 export const StopMessage = z.object({

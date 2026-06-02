@@ -52,7 +52,7 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Connection
-  backendUrl: "ws://192.168.1.100:3001",
+  backendUrl: "ws://127.0.0.1:3001",
   setBackendUrl: (url) => set({ backendUrl: url }),
   token: "",
   setToken: (token) => set({ token }),

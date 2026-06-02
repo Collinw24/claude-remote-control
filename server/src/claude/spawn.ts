@@ -18,6 +18,7 @@ export function spawnClaude(
   const args = [
     "-p", prompt,
     "--output-format", "stream-json",
+    "--verbose",
     "--include-partial-messages",
     "--no-session-persistence",
     "--dangerously-skip-permissions",
@@ -72,6 +73,12 @@ export function spawnClaude(
   });
 
   logger.info("Claude process spawned", { pid: child.pid });
+
+  // Close stdin immediately — we use -p for the prompt, no interactive input needed.
+  // Prevents "no stdin data received" warning.
+  if (child.stdin) {
+    child.stdin.end();
+  }
 
   return child;
 }
