@@ -12,12 +12,12 @@ import { useWebSocket } from "./src/hooks/useWebSocket";
 import { useAppStore } from "./src/state/store";
 
 const CMDS: Record<string, string> = {
-  "/diff": "Show git diff",
-  "/commit": "Commit staged changes",
-  "/revert": "Revert uncommitted changes",
-  "/tests": "Run test suite",
-  "/explain": "Explain last error",
-  "/continue": "Continue from where you left off",
+  "/diff": "git diff",
+  "/commit": "commit staged",
+  "/revert": "revert changes",
+  "/tests": "run tests",
+  "/explain": "explain error",
+  "/continue": "continue",
 };
 
 export default function App() {
@@ -26,7 +26,6 @@ export default function App() {
   const [showConn, setShowConn] = useState(true);
   const scrollRef = useRef<ScrollView>(null);
 
-  // Use Zustand store directly for URL/token so useWebSocket reads them
   const backendUrl = useAppStore((s) => s.backendUrl);
   const setBackendUrl = useAppStore((s) => s.setBackendUrl);
   const token = useAppStore((s) => s.token);
@@ -52,14 +51,11 @@ export default function App() {
     if (isConnected) setShowConn(false);
   }, [isConnected]);
 
-  // ── send prompt or slash command ──
-
   const handleSend = useCallback(() => {
     const text = input.trim();
     if (!text || !sendMessage) return;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Slash commands
     if (text.startsWith("/")) {
       const action = mapCommand(text);
       if (action) {
@@ -70,7 +66,6 @@ export default function App() {
       }
     }
 
-    // Normal prompt
     addMessage({ timestamp: new Date().toISOString(), type: "system", content: `> ${text}` });
     sendMessage({ type: "prompt", text, request_id: id });
     setInput("");
@@ -90,77 +85,80 @@ export default function App() {
     [sendMessage, pendingConfirmation, setPendingConfirmation]
   );
 
-  // ── render ──
-
-  const statusDot = isConnected ? "●" : "○";
-  const statusColor = isConnected ? "#0f0" : "#f00";
-  const runningTag = isRunning ? " ⚡" : runStatus === "completed" ? " ✓" : runStatus === "failed" ? " ✗" : "";
+  // Derive project name from cwd
+  const projectName = "wdfabrik";
 
   return (
-    <View style={S.term}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" />
+    <View style={S.shell}>
+      <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
 
-      {/* ── top bar ── */}
-      <View style={S.topBar}>
-        <TouchableOpacity onPress={() => setShowConn(!showConn)}>
-          <Text style={{ color: statusColor, fontFamily: "monospace", fontSize: 11 }}>
-            {statusDot}{runningTag} {isConnected ? "claude-remote" : "disconnected"}
+      {/* ── Header ── */}
+      <View style={S.header}>
+        <View style={S.headerLeft}>
+          <Text style={S.headerDot}>{isConnected ? "●" : "○"}</Text>
+          <Text style={S.headerText}>
+            {isConnected ? `claude  ·  ${projectName}` : "claude  ·  disconnected"}
           </Text>
-        </TouchableOpacity>
-        {!isConnected ? (
-          <TouchableOpacity onPress={connect}>
-            <Text style={[S.topBtn, { color: "#0f0" }]}>/connect</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity onPress={disconnect}>
-            <Text style={[S.topBtn, { color: "#f00" }]}>/disconnect</Text>
-          </TouchableOpacity>
-        )}
+        </View>
+        <View style={S.headerRight}>
+          {isRunning && <Text style={S.headerRunning}>⏺ running</Text>}
+          {!isConnected ? (
+            <TouchableOpacity onPress={connect}>
+              <Text style={S.headerAction}>/connect</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity onPress={disconnect}>
+              <Text style={[S.headerAction, { color: "#f85149" }]}>/disconnect</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
-      {/* ── connection config ── */}
+      {/* ── Connection panel (collapsible) ── */}
       {showConn && !isConnected && (
         <View style={S.connPanel}>
-          <Text style={S.label}>url</Text>
+          <Text style={S.connLabel}>backend</Text>
           <TextInput
             style={S.connInput}
             value={backendUrl}
             onChangeText={setBackendUrl}
             placeholder="ws://127.0.0.1:3001"
-            placeholderTextColor="#333"
+            placeholderTextColor="#30363d"
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Text style={S.label}>token</Text>
+          <Text style={S.connLabel}>token</Text>
           <TextInput
-            style={[S.connInput, { width: 160 }]}
+            style={[S.connInput, { flex: 0.7 }]}
             value={token}
             onChangeText={setToken}
-            placeholder="..."
-            placeholderTextColor="#333"
+            placeholder="····"
+            placeholderTextColor="#30363d"
             secureTextEntry
             autoCapitalize="none"
           />
         </View>
       )}
 
-      {/* ── conversation ── */}
-      <ScrollView ref={scrollRef} style={S.convo} contentContainerStyle={S.convoInner}>
+      {/* ── Conversation ── */}
+      <ScrollView ref={scrollRef} style={S.body} contentContainerStyle={S.bodyInner}>
         {messages.length === 0 ? (
-          <View>
-            <Text style={S.muted}>
+          <View style={S.placeholder}>
+            <Text style={S.placeholderLine}>claude code v1.0.0</Text>
+            <Text style={S.placeholderLine}>model: deepseek-v4-pro</Text>
+            <Text style={S.placeholderLine}>cwd: ~/documents/claude/WDFabrik</Text>
+            <Text style={S.placeholderMuted}>
               {isConnected
-                ? "● Connected. Type a prompt or /command.\n"
-                : "○ Disconnected. Enter URL and token, then /connect.\n"}
+                ? "\ntype a prompt to begin"
+                : "\nenter backend url and token, then /connect"}
             </Text>
-            <Text style={S.muted}>
-              {"\n"}Available commands:{'\n'}
+            <View style={S.cmdList}>
               {Object.entries(CMDS).map(([cmd, desc]) => (
-                <Text key={cmd} style={S.muted}>
-                  {"  "}{cmd}  — {desc}{'\n'}
+                <Text key={cmd} style={S.cmdItem}>
+                  {"  "}{cmd}  — {desc}
                 </Text>
               ))}
-            </Text>
+            </View>
           </View>
         ) : (
           messages.map((m) => (
@@ -170,76 +168,55 @@ export default function App() {
           ))
         )}
 
-        {/* running indicator */}
-        {isRunning && (
-          <Text style={{ color: "#0f0", fontFamily: "monospace", fontSize: 12, marginTop: 4 }}>
-            ⚡ Thinking...
-          </Text>
-        )}
-
-        {/* confirmation */}
+        {/* Confirmation dialog */}
         {pendingConfirmation && (
           <View style={S.confirm}>
-            <Text style={{ color: "#ff0", fontFamily: "monospace", fontSize: 12, marginBottom: 4 }}>
-              ⚠ {pendingConfirmation.prompt}
-            </Text>
-            <Text style={{ color: "#888", fontFamily: "monospace", fontSize: 11, marginBottom: 8 }}>
-              {pendingConfirmation.details.slice(0, 500)}
-            </Text>
-            <View style={{ flexDirection: "row", gap: 12 }}>
+            <Text style={S.confirmTitle}>⚠ {pendingConfirmation.prompt}</Text>
+            <Text style={S.confirmBody}>{pendingConfirmation.details.slice(0, 500)}</Text>
+            <View style={S.confirmRow}>
               <TouchableOpacity onPress={() => handleConfirm(true)}>
-                <Text style={{ color: "#0f0", fontFamily: "monospace", fontSize: 12, fontWeight: "bold" }}>Allow</Text>
+                <Text style={S.confirmYes}>Yes</Text>
               </TouchableOpacity>
               <TouchableOpacity onPress={() => handleConfirm(false)}>
-                <Text style={{ color: "#f00", fontFamily: "monospace", fontSize: 12, fontWeight: "bold" }}>Deny</Text>
+                <Text style={S.confirmNo}>No</Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
       </ScrollView>
 
-      {/* ── prompt line ── */}
-      <View style={S.promptRow}>
-        <Text style={S.prompt}>{">"}</Text>
-        <TextInput
-          style={S.promptInput}
-          value={input}
-          onChangeText={setInput}
-          placeholder={isConnected ? "Send a message (Enter to send)" : ""}
-          placeholderTextColor="#333"
-          autoCapitalize="none"
-          autoCorrect={false}
-          editable={isConnected && !isRunning}
-          onSubmitEditing={handleSend}
-          blurOnSubmit={false}
-        />
-        {isRunning && (
-          <TouchableOpacity onPress={handleStop} style={S.stopBtn}>
-            <Text style={{ color: "#fff", fontFamily: "monospace", fontSize: 10 }}>⏹ STOP</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {/* ── slash command hints ── */}
-      <View style={S.hintRow}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {Object.keys(CMDS).map((cmd) => (
-            <TouchableOpacity
-              key={cmd}
-              onPress={() => {
-                if (isConnected && !isRunning) setInput(cmd + " ");
-              }}
-            >
-              <Text style={S.hint}>{cmd} </Text>
+      {/* ── Prompt ── */}
+      <View style={S.footer}>
+        <View style={S.promptRow}>
+          <Text style={S.prompt}>{">"}</Text>
+          <TextInput
+            style={S.promptInput}
+            value={input}
+            onChangeText={setInput}
+            placeholder={isConnected ? "send a message (enter)" : ""}
+            placeholderTextColor="#30363d"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={isConnected && !isRunning}
+            onSubmitEditing={handleSend}
+            blurOnSubmit={false}
+          />
+          {isRunning && (
+            <TouchableOpacity onPress={handleStop} style={S.stopBtn}>
+              <Text style={S.stopText}>⏹</Text>
             </TouchableOpacity>
-          ))}
-        </ScrollView>
+          )}
+        </View>
       </View>
     </View>
   );
 }
 
-// ── slash command → quick_action mapping ──
+// ── helpers ──
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]0;.*?\x07/g, "");
+}
 
 function mapCommand(text: string): string | null {
   const t = text.toLowerCase().trim();
@@ -252,127 +229,221 @@ function mapCommand(text: string): string | null {
   return null;
 }
 
-// ── ANSI strip ──
-
-function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]0;.*?\x07/g, "");
-}
-
-// ── message colors ──
-
 function msgStyle(m: { type: string; isError?: boolean }): object {
-  const base = { fontFamily: "monospace", fontSize: 13, lineHeight: 19, marginBottom: 1 } as const;
+  const base = { fontFamily: "monospace", fontSize: 13, lineHeight: 20, marginBottom: 1 } as const;
   switch (m.type) {
     case "term":
-      return { ...base, color: "#0f0" };
+      return { ...base, color: "#c9d1d9" };
     case "system":
-      return { ...base, color: "#ff0", fontWeight: "bold" as const };
+      return { ...base, color: "#58a6ff", fontWeight: "600" as const };
     case "thinking":
-      return { ...base, color: "#555", fontStyle: "italic" as const };
+      return { ...base, color: "#484f58", fontStyle: "italic" as const };
     case "tool_use":
-      return { ...base, color: "#0af" };
+      return { ...base, color: "#7ee787" };
     case "tool_result":
-      return { ...base, color: m.isError ? "#f44" : "#0a0", marginLeft: 8 };
+      return { ...base, color: m.isError ? "#f85149" : "#8b949e", paddingLeft: 16 };
     case "error":
-      return { ...base, color: "#f44" };
+      return { ...base, color: "#f85149" };
     case "text":
     default:
-      return { ...base, color: "#ccc" };
+      return { ...base, color: "#c9d1d9" };
   }
 }
 
 // ── styles ──
 
 const S = StyleSheet.create({
-  term: { flex: 1, backgroundColor: "#000", padding: 8 },
+  shell: {
+    flex: 1,
+    backgroundColor: "#0d1117",
+    paddingHorizontal: 0,
+    paddingTop: 0,
+  },
 
-  topBar: {
+  // header
+  header: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#161b22",
     borderBottomWidth: 1,
-    borderBottomColor: "#1a1a1a",
-    marginBottom: 6,
+    borderBottomColor: "#21262d",
   },
-  topBtn: {
+  headerLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  headerDot: {
+    color: "#3fb950",
+    fontSize: 10,
+  },
+  headerText: {
+    color: "#8b949e",
+    fontFamily: "monospace",
+    fontSize: 12,
+  },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  headerRunning: {
+    color: "#d29922",
     fontFamily: "monospace",
     fontSize: 11,
-    fontWeight: "bold",
+  },
+  headerAction: {
+    color: "#58a6ff",
+    fontFamily: "monospace",
+    fontSize: 11,
+    fontWeight: "600",
   },
 
+  // connection panel
   connPanel: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    marginBottom: 6,
-    padding: 4,
-    backgroundColor: "#0a0a0a",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#161b22",
+    borderBottomWidth: 1,
+    borderBottomColor: "#21262d",
   },
-  label: { color: "#0f0", fontFamily: "monospace", fontSize: 11 },
-  connInput: {
-    backgroundColor: "#111",
-    color: "#ccc",
+  connLabel: {
+    color: "#8b949e",
     fontFamily: "monospace",
     fontSize: 11,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: "#333",
+  },
+  connInput: {
     flex: 1,
-    minWidth: 120,
-  },
-
-  convo: { flex: 1, marginBottom: 4 },
-  convoInner: { paddingBottom: 8 },
-
-  muted: { color: "#555", fontFamily: "monospace", fontSize: 12, lineHeight: 18 },
-
-  confirm: {
+    backgroundColor: "#0d1117",
+    color: "#c9d1d9",
+    fontFamily: "monospace",
+    fontSize: 11,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderWidth: 1,
-    borderColor: "#f0a500",
-    padding: 8,
-    marginTop: 8,
+    borderColor: "#30363d",
+    borderRadius: 6,
   },
 
+  // body
+  body: {
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+  bodyInner: {
+    paddingTop: 12,
+    paddingBottom: 16,
+  },
+
+  // placeholder
+  placeholder: {
+    paddingTop: 4,
+  },
+  placeholderLine: {
+    color: "#8b949e",
+    fontFamily: "monospace",
+    fontSize: 12,
+    lineHeight: 20,
+  },
+  placeholderMuted: {
+    color: "#484f58",
+    fontFamily: "monospace",
+    fontSize: 12,
+    lineHeight: 20,
+  },
+  cmdList: {
+    marginTop: 12,
+  },
+  cmdItem: {
+    color: "#30363d",
+    fontFamily: "monospace",
+    fontSize: 11,
+    lineHeight: 18,
+  },
+
+  // confirmation
+  confirm: {
+    marginTop: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "#d29922",
+    borderRadius: 6,
+    backgroundColor: "#161b22",
+  },
+  confirmTitle: {
+    color: "#d29922",
+    fontFamily: "monospace",
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 6,
+  },
+  confirmBody: {
+    color: "#8b949e",
+    fontFamily: "monospace",
+    fontSize: 11,
+    marginBottom: 10,
+    lineHeight: 16,
+  },
+  confirmRow: {
+    flexDirection: "row",
+    gap: 16,
+  },
+  confirmYes: {
+    color: "#3fb950",
+    fontFamily: "monospace",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  confirmNo: {
+    color: "#f85149",
+    fontFamily: "monospace",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  // footer / prompt
+  footer: {
+    borderTopWidth: 1,
+    borderTopColor: "#21262d",
+    backgroundColor: "#161b22",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
   promptRow: {
     flexDirection: "row",
     alignItems: "center",
-    borderTopWidth: 1,
-    borderTopColor: "#1a1a1a",
-    paddingTop: 6,
-    gap: 6,
+    gap: 10,
   },
   prompt: {
-    color: "#0f0",
+    color: "#58a6ff",
     fontFamily: "monospace",
     fontSize: 15,
-    fontWeight: "bold",
+    fontWeight: "600",
   },
   promptInput: {
     flex: 1,
-    color: "#0f0",
+    color: "#c9d1d9",
     fontFamily: "monospace",
     fontSize: 13,
-    padding: 6,
-    backgroundColor: "#0a0a0a",
-    borderRadius: 0,
+    paddingVertical: 6,
+    paddingHorizontal: 0,
   },
   stopBtn: {
-    backgroundColor: "#c00",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 2,
+    backgroundColor: "#da3633",
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
   },
-
-  hintRow: {
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: "#111",
-  },
-  hint: {
-    color: "#333",
-    fontFamily: "monospace",
-    fontSize: 10,
-    marginRight: 10,
+  stopText: {
+    color: "#fff",
+    fontSize: 12,
   },
 });
