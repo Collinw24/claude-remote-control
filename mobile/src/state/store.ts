@@ -53,9 +53,9 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Connection
-  backendUrl: "ws://127.0.0.1:3001",
+  backendUrl: "ws://10.0.2.2:3001",
   setBackendUrl: (url) => set({ backendUrl: url }),
-  token: "",
+  token: "testtoken",
   setToken: (token) => set({ token }),
   connectionStatus: "disconnected",
   setConnectionStatus: (status) => set({ connectionStatus: status }),

@@ -274,11 +274,14 @@ export function handleConnection(ws: WebSocket): void {
   logger.info("Client connected", { total: clients.size });
 
   ws.on("message", (raw) => {
+    const rawStr = raw.toString().trim();
+    if (!rawStr) return;
+
     let data: unknown;
-    try { data = JSON.parse(raw.toString()); } catch { sendError(ws, "Invalid JSON"); return; }
+    try { data = JSON.parse(rawStr); } catch { return; }
 
     const message = parseClientMessage(data);
-    if (!message) { sendError(ws, "Invalid message format"); return; }
+    if (!message) { logger.debug("Unknown message format", { raw: rawStr.slice(0, 200) }); return; }
 
     if (message.type === "auth") {
       if (message.token === appConfig.remoteToken) {
