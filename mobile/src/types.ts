@@ -93,10 +93,16 @@ export interface ServerErrorMessage {
   message: string;
 }
 
+export interface TermMessage {
+  type: "term";
+  text: string;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
   | StatusMessage
+  | TermMessage
   | RunStartedMessage
   | AgentOutputMessage
   | AgentErrorMessage
@@ -157,7 +163,7 @@ export type RunStatus = "idle" | "running" | "completed" | "stopped" | "failed";
 export interface LogEntry {
   id: string;
   timestamp: string;
-  type: "thinking" | "text" | "tool_use" | "tool_result" | "error" | "system";
+  type: "thinking" | "text" | "tool_use" | "tool_result" | "error" | "system" | "term";
   content: string;
   toolName?: string;
   isError?: boolean;

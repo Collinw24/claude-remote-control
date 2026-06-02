@@ -4,8 +4,7 @@ import { appConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { parseClientMessage, ServerMessage } from "./protocol.js";
 import { spawnClaude, stopRun as killClaude } from "../claude/spawn.js";
-import { createParser, ParserCallbacks } from "../claude/parser.js";
-import { scanPrompt, scanCommand } from "../claude/guardrails.js";
+import { scanPrompt } from "../claude/guardrails.js";
 import { runGitDiff } from "../quick-actions/git-diff.js";
 import { runCommit } from "../quick-actions/commit.js";
 import { runRevert } from "../quick-actions/revert.js";
@@ -27,10 +26,7 @@ interface ClientState {
   runStartedAt: number | null;
   pendingConfirmation: PendingConfirmation | null;
   lastError: string | null;
-  outputLines: ServerMessage[];
 }
-
-// ── In-memory client registry ──
 
 const clients = new Map<WebSocket, ClientState>();
 
@@ -47,7 +43,6 @@ function createClientState(): ClientState {
     runStartedAt: null,
     pendingConfirmation: null,
     lastError: null,
-    outputLines: [],
   };
 }
 
@@ -59,337 +54,130 @@ function send(ws: WebSocket, message: ServerMessage): void {
   }
 }
 
-function sendError(ws: WebSocket, message: string): void {
-  send(ws, { type: "server_error", message });
+function sendTerm(ws: WebSocket, text: string): void {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "term", text }));
+  }
 }
 
-function sendStatus(ws: WebSocket, state: ClientState): void {
-  send(ws, {
-    type: "status",
-    connected: state.authenticated,
-    running: state.currentProcess !== null,
-    run_id: state.currentRunId,
-    cwd: appConfig.projectDir,
-    model: appConfig.model,
-  });
+function sendError(ws: WebSocket, message: string): void {
+  send(ws, { type: "server_error", message });
 }
 
 // ── Stop current run ──
 
 function stopCurrentRun(state: ClientState, reason: "user_requested" | "guardrails"): void {
   if (!state.currentProcess) return;
-  logger.info("Stopping run", {
-    runId: state.currentRunId,
-    requestId: state.currentRequestId,
-    reason,
-  });
+  logger.info("Stopping run", { runId: state.currentRunId, reason });
   killClaude(state.currentProcess);
   state.currentProcess = null;
   state.currentRunId = null;
   state.runStartedAt = null;
-  // requestId is kept for the stopped/failed message
 }
 
-// ── Run Claude ──
+// ── Run Claude (raw terminal mode) ──
 
 function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId: string): void {
-  // Stop any existing run first
   stopCurrentRun(state, "user_requested");
 
   const runId = uuidv4();
   state.currentRunId = runId;
   state.currentRequestId = requestId;
   state.runStartedAt = Date.now();
-  state.outputLines = [];
   state.lastError = null;
 
   logger.info("Launching Claude", { runId, requestId, prompt: prompt.slice(0, 200) });
 
-  send(ws, {
-    type: "run_started",
-    request_id: requestId,
-    run_id: runId,
-    timestamp: new Date().toISOString(),
-  });
-  sendStatus(ws, state);
+  sendTerm(ws, `\x1b[1m> ${prompt}\x1b[0m\n\n`);
+  send(ws, { type: "run_started", request_id: requestId, run_id: runId, timestamp: new Date().toISOString() });
 
-  const child = spawnClaude(prompt, { requestId });
+  const child = spawnClaude(prompt);
   state.currentProcess = child;
 
-  const callbacks: ParserCallbacks = {
-    onThinking(text, timestamp) {
-      const msg = {
-        type: "agent_output" as const,
-        request_id: requestId,
-        content_type: "thinking" as const,
-        content: text,
-        timestamp,
-      };
-      state.outputLines.push(msg);
-      send(ws, msg);
-    },
-    onText(text, timestamp) {
-      const msg = {
-        type: "agent_output" as const,
-        request_id: requestId,
-        content_type: "text" as const,
-        content: text,
-        timestamp,
-      };
-      state.outputLines.push(msg);
-      send(ws, msg);
-    },
-    onToolUse(toolName, toolInput, toolId, timestamp) {
-      // Guardrail: scan the command
-      if (toolName === "Bash" && toolInput && typeof toolInput.command === "string") {
-        const result = scanCommand(toolInput.command as string);
-        if (result.action === "block") {
-          logger.warn("Guardrail blocked tool_use", {
-            runId,
-            requestId,
-            command: (toolInput.command as string).slice(0, 200),
-            reason: result.reason,
-          });
-          stopCurrentRun(state, "guardrails");
-          send(ws, {
-            type: "run_stopped",
-            request_id: requestId,
-            reason: "guardrails",
-          });
-          send(ws, {
-            type: "server_error",
-            message: `Blocked dangerous command: ${result.reason}`,
-          });
-          sendStatus(ws, state);
-          return; // Don't forward the tool_use
-        }
-        if (result.action === "confirm") {
-          // Post-hoc guard: tool already executing. Log it and warn.
-          logger.warn("Confirm-required tool_use executing (post-hoc)", {
-            runId,
-            requestId,
-            command: (toolInput.command as string).slice(0, 200),
-            reason: result.reason,
-          });
-          // For MVP: still forward the tool_use but mark it
-          const msg = {
-            type: "agent_output" as const,
-            request_id: requestId,
-            content_type: "tool_use" as const,
-            tool_name: toolName,
-            tool_input: toolInput,
-            tool_id: toolId,
-            content: `⚠️ DANGEROUS: ${result.reason}\n${toolInput.command}`,
-            timestamp,
-          };
-          state.outputLines.push(msg);
-          send(ws, msg);
-          return;
-        }
-      }
-
-      const msg = {
-        type: "agent_output" as const,
-        request_id: requestId,
-        content_type: "tool_use" as const,
-        tool_name: toolName,
-        tool_input: toolInput,
-        tool_id: toolId,
-        timestamp,
-      };
-      state.outputLines.push(msg);
-      send(ws, msg);
-    },
-    onToolResult(toolId, stdout, stderr, isError, timestamp) {
-      const msg = {
-        type: "agent_output" as const,
-        request_id: requestId,
-        content_type: "tool_result" as const,
-        tool_id: toolId,
-        stdout: stdout || undefined,
-        stderr: stderr || undefined,
-        is_error: isError,
-        timestamp,
-      };
-      state.outputLines.push(msg);
-      send(ws, msg);
-
-      if (stderr) {
-        state.lastError = stderr;
-      }
-    },
-    onError(message) {
-      state.lastError = message;
-      send(ws, {
-        type: "agent_error",
-        message,
-        request_id: requestId,
-      });
-    },
-    onCompleted(result, numTurns, usage) {
-      const duration = state.runStartedAt ? Date.now() - state.runStartedAt : 0;
-      logger.info("Run completed", { runId, requestId, numTurns, durationMs: duration });
-      state.currentProcess = null;
-      state.currentRunId = null;
-      state.runStartedAt = null;
-      send(ws, {
-        type: "run_completed",
-        request_id: requestId,
-        result,
-        num_turns: numTurns,
-        duration_ms: duration,
-        usage,
-      });
-      sendStatus(ws, state);
-    },
-    onFailed(error, code) {
-      const duration = state.runStartedAt ? Date.now() - state.runStartedAt : 0;
-      logger.error("Run failed", { runId, requestId, error, code, durationMs: duration });
-      state.currentProcess = null;
-      state.currentRunId = null;
-      state.runStartedAt = null;
-      state.lastError = error;
-      send(ws, {
-        type: "run_failed",
-        request_id: requestId,
-        error,
-        code,
-      });
-      sendStatus(ws, state);
-    },
-  };
-
-  const parser = createParser(callbacks);
-
-  // Pipe stdout through the JSONL parser
+  // Pipe stdout directly to client as terminal output
   if (child.stdout) {
-    let buffer = "";
     child.stdout.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || ""; // Keep incomplete line in buffer
-      for (const line of lines) {
-        if (line.trim()) {
-          parser.feed(line.trim());
-        }
-      }
-    });
-    child.stdout.on("end", () => {
-      if (buffer.trim()) {
-        parser.feed(buffer.trim());
-      }
+      sendTerm(ws, chunk.toString());
     });
   }
 
-  // Pipe stderr through error handler
+  // Pipe stderr — mark as dim/red in the terminal
   if (child.stderr) {
-    let errBuffer = "";
     child.stderr.on("data", (chunk: Buffer) => {
-      errBuffer += chunk.toString();
-      const lines = errBuffer.split("\n");
-      errBuffer = lines.pop() || "";
-      for (const line of lines) {
-        if (line.trim()) {
-          callbacks.onError(line.trim());
-        }
-      }
-    });
-    child.stderr.on("end", () => {
-      if (errBuffer.trim()) {
-        callbacks.onError(errBuffer.trim());
-      }
+      state.lastError = chunk.toString();
+      sendTerm(ws, `\x1b[2m${chunk.toString()}\x1b[0m`);
     });
   }
 
-  // Handle process exit
-  child.on("exit", (code, signal) => {
-    if (code !== 0 && state.currentProcess === child) {
-      callbacks.onFailed(
-        `Process exited with code ${code}${signal ? `, signal ${signal}` : ""}`,
-        code ? `EXIT_${code}` : `SIGNAL_${signal}`
-      );
+  // Process exit
+  child.on("exit", (code) => {
+    const duration = state.runStartedAt ? Date.now() - state.runStartedAt : 0;
+    state.currentProcess = null;
+    state.currentRunId = null;
+    state.runStartedAt = null;
+
+    if (code === 0 || code === null) {
+      logger.info("Run completed", { runId, requestId, durationMs: duration });
+      sendTerm(ws, `\n✓ Completed in ${(duration / 1000).toFixed(1)}s\n`);
+      send(ws, { type: "run_completed", request_id: requestId, result: "", num_turns: 0, duration_ms: duration, usage: {} });
+    } else {
+      logger.error("Run failed", { runId, requestId, exitCode: code, durationMs: duration });
+      sendTerm(ws, `\n✗ Exited with code ${code}\n`);
+      send(ws, { type: "run_failed", request_id: requestId, error: `Exit code ${code}`, code: `EXIT_${code}` });
     }
   });
 
   child.on("error", (err) => {
-    logger.error("Spawn error", { runId, requestId, error: err.message });
+    logger.error("Spawn error", { runId, error: err.message });
     if (state.currentProcess === child) {
-      callbacks.onFailed(`Failed to spawn Claude: ${err.message}`, "SPAWN_ERROR");
+      state.currentProcess = null;
+      state.currentRunId = null;
+      state.runStartedAt = null;
+      sendTerm(ws, `\n✗ Spawn failed: ${err.message}\n`);
+      send(ws, { type: "run_failed", request_id: requestId, error: err.message, code: "SPAWN_ERROR" });
     }
   });
 }
 
-// ── Handle quick actions ──
+// ── Quick actions ──
 
-async function handleQuickAction(
-  ws: WebSocket,
-  state: ClientState,
-  action: string,
-  requestId: string
-): Promise<void> {
+async function handleQuickAction(ws: WebSocket, state: ClientState, action: string, requestId: string): Promise<void> {
   logger.info("Quick action", { action, requestId });
 
   switch (action) {
     case "continue":
       runClaude(ws, state, "Continue from where you left off.", requestId);
       break;
-
     case "run_tests":
-      runClaude(
-        ws,
-        state,
-        "Run the project's test suite, summarize failures, and fix them if safe.",
-        requestId
-      );
+      runClaude(ws, state, "Run the project's test suite, summarize failures, and fix them if safe.", requestId);
       break;
-
     case "git_diff":
       try {
         const diff = await runGitDiff(appConfig.projectDir);
-        send(ws, {
-          type: "git_diff",
-          request_id: requestId,
-          diff: diff.diff,
-          files: diff.files,
-          stats: diff.stats,
-        });
+        sendTerm(ws, `\n${diff.stats}\n\n${diff.diff.slice(0, 8000)}\n`);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        sendError(ws, `Git diff failed: ${message}`);
+        sendError(ws, `Git diff failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       break;
-
     case "explain_error":
       if (!state.lastError) {
-        sendError(ws, "No previous error to explain. Run a prompt first.");
+        sendError(ws, "No previous error to explain.");
       } else {
-        runClaude(
-          ws,
-          state,
-          `The last command produced this error:\n\n${state.lastError}\n\nExplain what went wrong and propose the smallest safe fix.`,
-          requestId
-        );
+        runClaude(ws, state, `The last command produced this error:\n\n${state.lastError}\n\nExplain what went wrong and propose the smallest safe fix.`, requestId);
       }
       break;
-
     case "commit":
       await handleCommitAction(ws, state, requestId);
       break;
-
     case "revert":
       await handleRevertAction(ws, state, requestId);
       break;
-
     default:
       sendError(ws, `Unknown quick action: ${action}`);
   }
 }
 
-async function handleCommitAction(
-  ws: WebSocket,
-  state: ClientState,
-  requestId: string
-): Promise<void> {
+async function handleCommitAction(ws: WebSocket, state: ClientState, requestId: string): Promise<void> {
   try {
     const result = await runCommit(appConfig.projectDir);
     if (result.needsConfirmation) {
@@ -398,29 +186,22 @@ async function handleCommitAction(
         type: "confirmation_required",
         action_id: actionId,
         request_id: requestId,
-        prompt: `Commit changes?`,
-        details: `Files changed:\n${(result.files || []).join("\n")}\n\n${result.diff}`,
+        prompt: "Commit changes?",
+        details: `Files:\n${(result.files || []).join("\n")}\n\n${result.diff?.slice(0, 3000) || ""}`,
       });
-      // Wait for confirmation response (handled in message switch)
       state.pendingConfirmation = {
         actionId,
         resolve: async (approved: boolean) => {
           state.pendingConfirmation = null;
           if (approved) {
             try {
-              const commitResult = await runCommit(appConfig.projectDir, true);
-              send(ws, {
-                type: "agent_output",
-                request_id: requestId,
-                content_type: "text",
-                content: commitResult.commitMessage || "Changes committed successfully.",
-                timestamp: new Date().toISOString(),
-              });
+              const r = await runCommit(appConfig.projectDir, true);
+              sendTerm(ws, `\n${r.commitMessage || "Committed."}\n`);
             } catch (err) {
               sendError(ws, `Commit failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            sendError(ws, "Commit cancelled by user.");
+            sendTerm(ws, "\nCommit cancelled.\n");
           }
         },
         timer: setTimeout(() => {
@@ -431,13 +212,7 @@ async function handleCommitAction(
         }, 60_000),
       };
     } else if (result.committed) {
-      send(ws, {
-        type: "agent_output",
-        request_id: requestId,
-        content_type: "text",
-        content: result.commitMessage || "Changes committed.",
-        timestamp: new Date().toISOString(),
-      });
+      sendTerm(ws, `\n${result.commitMessage || "Committed."}\n`);
     } else {
       sendError(ws, result.error || "Nothing to commit.");
     }
@@ -446,21 +221,11 @@ async function handleCommitAction(
   }
 }
 
-async function handleRevertAction(
-  ws: WebSocket,
-  state: ClientState,
-  requestId: string
-): Promise<void> {
+async function handleRevertAction(ws: WebSocket, state: ClientState, requestId: string): Promise<void> {
   if (!appConfig.allowDestructiveActions) {
-    send(ws, {
-      type: "server_error",
-      message:
-        "Revert is disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env to enable destructive actions.\n" +
-        "⚠️ WARNING: This will discard uncommitted changes.",
-    });
+    sendError(ws, "Revert disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env");
     return;
   }
-
   try {
     const result = await runRevert(appConfig.projectDir);
     if (result.needsConfirmation) {
@@ -470,7 +235,7 @@ async function handleRevertAction(
         action_id: actionId,
         request_id: requestId,
         prompt: "Revert all uncommitted changes?",
-        details: `⚠️ This will discard:\n${(result.files || []).join("\n")}\n\n${result.diff}`,
+        details: `Files:\n${(result.files || []).join("\n")}\n\n${result.diff?.slice(0, 3000) || ""}`,
       });
       state.pendingConfirmation = {
         actionId,
@@ -478,19 +243,13 @@ async function handleRevertAction(
           state.pendingConfirmation = null;
           if (approved) {
             try {
-              const revertResult = await runRevert(appConfig.projectDir, true);
-              send(ws, {
-                type: "agent_output",
-                request_id: requestId,
-                content_type: "text",
-                content: revertResult.message || "Changes reverted.",
-                timestamp: new Date().toISOString(),
-              });
+              const r = await runRevert(appConfig.projectDir, true);
+              sendTerm(ws, `\n${r.message || "Reverted."}\n`);
             } catch (err) {
               sendError(ws, `Revert failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            sendError(ws, "Revert cancelled by user.");
+            sendTerm(ws, "\nRevert cancelled.\n");
           }
         },
         timer: setTimeout(() => {
@@ -511,116 +270,65 @@ async function handleRevertAction(
 export function handleConnection(ws: WebSocket): void {
   const state = createClientState();
   clients.set(ws, state);
-
-  logger.info("WebSocket client connected", { totalClients: clients.size });
+  logger.info("Client connected", { total: clients.size });
 
   ws.on("message", (raw) => {
     let data: unknown;
-    try {
-      data = JSON.parse(raw.toString());
-    } catch {
-      sendError(ws, "Invalid JSON");
-      return;
-    }
+    try { data = JSON.parse(raw.toString()); } catch { sendError(ws, "Invalid JSON"); return; }
 
     const message = parseClientMessage(data);
-    if (!message) {
-      sendError(ws, "Invalid message format");
-      return;
-    }
+    if (!message) { sendError(ws, "Invalid message format"); return; }
 
-    // Handle auth
     if (message.type === "auth") {
       if (message.token === appConfig.remoteToken) {
         state.authenticated = true;
         logger.info("Client authenticated");
-        send(ws, {
-          type: "auth_ok",
-          session: uuidv4(),
-          server_version: "1.0.0",
-          model: appConfig.model,
-        });
-        sendStatus(ws, state);
+        send(ws, { type: "auth_ok", session: uuidv4(), server_version: "1.0.0", model: appConfig.model });
+        sendTerm(ws, `\x1b[1m● Connected\x1b[0m  model: ${appConfig.model}  cwd: ${appConfig.projectDir}\n\n`);
       } else {
-        logger.warn("Client auth failed — invalid token");
+        logger.warn("Auth failed");
         send(ws, { type: "auth_error", message: "Invalid token" });
       }
       return;
     }
 
-    // All other messages require authentication
-    if (!state.authenticated) {
-      sendError(ws, "Not authenticated. Send auth message first.");
-      return;
-    }
+    if (!state.authenticated) { sendError(ws, "Not authenticated."); return; }
 
     switch (message.type) {
       case "prompt": {
-        // Guardrail: scan prompt text before spawning
-        const scanResult = scanPrompt(message.text);
-        if (!scanResult.safe) {
-          logger.warn("Guardrail blocked prompt", {
-            requestId: message.request_id,
-            reason: scanResult.reason,
-          });
-          sendError(ws, `Prompt blocked: ${scanResult.reason}`);
-          return;
-        }
-        logger.info("Prompt received", {
-          requestId: message.request_id,
-          prompt: message.text.slice(0, 200),
-        });
+        const scan = scanPrompt(message.text);
+        if (!scan.safe) { sendError(ws, `Blocked: ${scan.reason}`); return; }
         runClaude(ws, state, message.text, message.request_id);
         break;
       }
-
       case "stop":
-        logger.info("Stop requested", { runId: state.currentRunId });
         if (state.currentProcess) {
           stopCurrentRun(state, "user_requested");
-          send(ws, {
-            type: "run_stopped",
-            request_id: state.currentRequestId || "unknown",
-            reason: "user_requested",
-          });
-          sendStatus(ws, state);
+          send(ws, { type: "run_stopped", request_id: state.currentRequestId || "unknown", reason: "user_requested" });
+          sendTerm(ws, "\n⏹ Stopped\n");
         }
         break;
-
       case "quick_action":
         handleQuickAction(ws, state, message.action, message.request_id);
         break;
-
-      case "confirm_action": {
-        if (state.pendingConfirmation && state.pendingConfirmation.actionId === message.action_id) {
+      case "confirm_action":
+        if (state.pendingConfirmation?.actionId === message.action_id) {
           clearTimeout(state.pendingConfirmation.timer);
           state.pendingConfirmation.resolve(message.approved);
         } else {
-          sendError(ws, "No matching pending confirmation.");
+          sendError(ws, "No matching confirmation.");
         }
         break;
-      }
-
       case "get_status":
-        sendStatus(ws, state);
-        break;
-
-      default:
-        sendError(ws, `Unknown message type`);
+        break; // status is shown via term messages now
     }
   });
 
   ws.on("close", () => {
-    logger.info("WebSocket client disconnected", { totalClients: clients.size - 1 });
-    // Clean up
-    if (state.currentProcess) {
-      stopCurrentRun(state, "user_requested");
-    }
-    if (state.pendingConfirmation) {
-      clearTimeout(state.pendingConfirmation.timer);
-      state.pendingConfirmation.resolve(false);
-    }
+    if (state.currentProcess) stopCurrentRun(state, "user_requested");
+    if (state.pendingConfirmation) { clearTimeout(state.pendingConfirmation.timer); state.pendingConfirmation.resolve(false); }
     clients.delete(ws);
+    logger.info("Client disconnected", { total: clients.size });
   });
 
   ws.on("error", (err) => {

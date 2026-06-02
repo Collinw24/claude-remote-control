@@ -139,6 +139,11 @@ export interface GitDiffMessage {
   stats: string;
 }
 
+export interface TermMessage {
+  type: "term";
+  text: string;
+}
+
 export interface ServerErrorMessage {
   type: "server_error";
   message: string;
@@ -148,6 +153,7 @@ export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
   | StatusMessage
+  | TermMessage
   | RunStartedMessage
   | AgentOutputMessage
   | AgentErrorMessage

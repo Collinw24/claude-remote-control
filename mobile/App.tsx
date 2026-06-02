@@ -165,7 +165,7 @@ export default function App() {
         ) : (
           messages.map((m) => (
             <Text key={m.id} style={msgStyle(m)}>
-              {m.content}
+              {m.type === "term" ? stripAnsi(m.content) : m.content}
             </Text>
           ))
         )}
@@ -252,13 +252,21 @@ function mapCommand(text: string): string | null {
   return null;
 }
 
+// ── ANSI strip ──
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]0;.*?\x07/g, "");
+}
+
 // ── message colors ──
 
 function msgStyle(m: { type: string; isError?: boolean }): object {
-  const base = { fontFamily: "monospace", fontSize: 13, lineHeight: 19, marginBottom: 2 } as const;
+  const base = { fontFamily: "monospace", fontSize: 13, lineHeight: 19, marginBottom: 1 } as const;
   switch (m.type) {
+    case "term":
+      return { ...base, color: "#0f0" };
     case "system":
-      return { ...base, color: "#0f0", fontWeight: "bold" as const };
+      return { ...base, color: "#ff0", fontWeight: "bold" as const };
     case "thinking":
       return { ...base, color: "#555", fontStyle: "italic" as const };
     case "tool_use":

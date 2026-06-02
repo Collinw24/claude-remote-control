@@ -1,25 +1,14 @@
 import { spawn, ChildProcess } from "child_process";
 import { appConfig } from "../config.js";
 import { logger } from "../logger.js";
-import type { SpawnOptions } from "../types.js";
 
 /**
- * Spawn a Claude Code process in headless mode with DeepSeek routing.
- *
- * SECURITY WARNING: This spawns a process that can execute arbitrary shell
- * commands and edit files. The --dangerously-skip-permissions flag means
- * Claude will NOT prompt for approval. Guardrails are handled by the
- * WebSocket handler layer before forwarding to the client.
+ * Spawn Claude Code in headless text mode.
+ * Raw stdout is streamed directly to the client as terminal output.
  */
-export function spawnClaude(
-  prompt: string,
-  options: SpawnOptions
-): ChildProcess {
+export function spawnClaude(prompt: string): ChildProcess {
   const args = [
     "-p", prompt,
-    "--output-format", "stream-json",
-    "--verbose",
-    "--include-partial-messages",
     "--no-session-persistence",
     "--dangerously-skip-permissions",
     "--allowedTools",
@@ -42,7 +31,6 @@ export function spawnClaude(
     ].join(","),
   ];
 
-  // DeepSeek Anthropic-compatible routing
   const env = {
     ...process.env,
     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
@@ -54,18 +42,17 @@ export function spawnClaude(
     CLAUDE_CODE_SUBAGENT_MODEL: appConfig.smallModel,
     API_TIMEOUT_MS: "600000",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    ANTHROPIC_API_KEY: "", // explicitly empty — use AUTH_TOKEN
+    ANTHROPIC_API_KEY: "",
   };
 
-  logger.debug("Spawning Claude", {
-    claudePath: appConfig.claudePath,
-    cwd: options.projectDir || appConfig.projectDir,
+  logger.debug("Spawning Claude (text mode)", {
+    cwd: appConfig.projectDir,
     model: appConfig.model,
     promptLength: prompt.length,
   });
 
   const child = spawn(appConfig.claudePath, args, {
-    cwd: options.projectDir || appConfig.projectDir,
+    cwd: appConfig.projectDir,
     env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
@@ -74,8 +61,7 @@ export function spawnClaude(
 
   logger.info("Claude process spawned", { pid: child.pid });
 
-  // Close stdin immediately — we use -p for the prompt, no interactive input needed.
-  // Prevents "no stdin data received" warning.
+  // Close stdin — we pass the prompt via -p
   if (child.stdin) {
     child.stdin.end();
   }
@@ -85,27 +71,15 @@ export function spawnClaude(
 
 /**
  * Stop a running Claude process.
- * Sends SIGTERM first, escalates to SIGKILL after 5 seconds.
  */
 export function stopRun(child: ChildProcess): void {
   if (child.exitCode !== null || child.killed) return;
-
   logger.info("Stopping Claude process", { pid: child.pid });
   child.kill("SIGTERM");
-
   const forceTimer = setTimeout(() => {
     if (child.exitCode === null && !child.killed) {
-      logger.warn("Force killing Claude process", { pid: child.pid });
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Process may have exited between check and kill
-      }
+      try { child.kill("SIGKILL"); } catch {}
     }
   }, 5000);
-
-  // Don't let the timer keep the process alive
-  if (forceTimer.unref) {
-    forceTimer.unref();
-  }
+  if (forceTimer.unref) forceTimer.unref();
 }

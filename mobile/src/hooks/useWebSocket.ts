@@ -64,21 +64,23 @@ export function useWebSocket() {
           setConnectionStatus("disconnected");
           break;
 
+        case "term":
+          // Raw terminal output — display as-is
+          addMessage({
+            timestamp: new Date().toISOString(),
+            type: "term",
+            content: data.text,
+          });
+          break;
+
         case "status":
-          setRunStatus(
-            data.running ? "running" : "idle"
-          );
+          setRunStatus(data.running ? "running" : "idle");
           if (data.run_id) setRunId(data.run_id);
           break;
 
         case "run_started":
           setRunStatus("running");
           setRunId(data.run_id);
-          addMessage({
-            timestamp: data.timestamp,
-            type: "system",
-            content: `▶ Run started (${data.run_id.slice(0, 8)}...)`,
-          });
           break;
 
         case "agent_output": {
