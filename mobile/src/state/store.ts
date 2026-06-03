@@ -8,6 +8,12 @@ import type {
   LogEntry,
 } from "../types";
 
+// ── Caps ──
+
+/** Maximum number of messages persisted to AsyncStorage. Older messages are
+ *  trimmed when the limit is exceeded.  200 entries ≈ 100–200 KB. */
+const MAX_MESSAGES = 200;
+
 // Generate a simple unique ID (no uuid dependency needed on mobile)
 let idCounter = 0;
 function uid(): string {
@@ -37,6 +43,10 @@ interface AppState {
   setRunId: (id: string | null) => void;
   serverModel: string;
   setServerModel: (model: string) => void;
+
+  // Session tracking (persisted so conversations are grouped)
+  lastSessionId: string | null;
+  setLastSessionId: (id: string | null) => void;
 
   // Output log
   messages: LogEntry[];
@@ -72,20 +82,29 @@ export const useAppStore = create<AppState>()(
       serverModel: "",
       setServerModel: (model) => set({ serverModel: model }),
 
+      // Session tracking
+      lastSessionId: null,
+      setLastSessionId: (id) => set({ lastSessionId: id }),
+
       // Output log
       messages: [],
       addMessage: (entry) => {
         const id = uid();
-        set((s) => ({
-          messages: [...s.messages, { ...entry, id }],
-        }));
+        set((s) => {
+          const next = [...s.messages, { ...entry, id }];
+          // Trim oldest messages when over the cap
+          if (next.length > MAX_MESSAGES) {
+            return { messages: next.slice(next.length - MAX_MESSAGES) };
+          }
+          return { messages: next };
+        });
         return id;
       },
       removeMessage: (id) =>
         set((s) => ({
           messages: s.messages.filter((m) => m.id !== id),
         })),
-      clearMessages: () => set({ messages: [] }),
+      clearMessages: () => set({ messages: [], lastSessionId: null }),
 
       // Confirmation
       pendingConfirmation: null,
@@ -101,7 +120,21 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         backendUrl: state.backendUrl,
         token: state.token,
+        messages: state.messages,
+        lastSessionId: state.lastSessionId,
       }),
+      // Trim messages on rehydration (belt-and-suspenders)
+      onRehydrateStorage: () => (state, error) => {
+        if (error) {
+          console.warn("[store] rehydration failed:", error);
+          return;
+        }
+        if (state && state.messages.length > MAX_MESSAGES) {
+          state.messages = state.messages.slice(
+            state.messages.length - MAX_MESSAGES
+          );
+        }
+      },
     }
   )
 );

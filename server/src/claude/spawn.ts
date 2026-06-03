@@ -9,7 +9,6 @@ import { logger } from "../logger.js";
 export function spawnClaude(prompt: string): ChildProcess {
   const args = [
     "-p", prompt,
-    "--no-session-persistence",
     "--dangerously-skip-permissions",
     "--allowedTools",
     [
