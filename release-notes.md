@@ -1,6 +1,7 @@
 ## v1.0.2-alpha - Tailscale connection test build
 
 ### Patch update
+- Renamed the app to `RemoteClaudetrol` and refreshed the launcher icon for the Claude remote-control workflow.
 - Moved the prompt bar above Android system navigation by applying the bottom safe-area inset.
 - Added an explicit Android keyboard-height spacer so the prompt bar moves above Samsung keyboards.
 - Switched Android keyboard layout mode to pan while the app handles the prompt offset itself.
