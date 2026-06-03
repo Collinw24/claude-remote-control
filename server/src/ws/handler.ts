@@ -9,8 +9,12 @@ import { runGitDiff } from "../quick-actions/git-diff.js";
 import { runCommit } from "../quick-actions/commit.js";
 import { runRevert } from "../quick-actions/revert.js";
 import type { ChildProcess } from "child_process";
-
-// ── Per-client state ──
+import {
+  appendBufferedTerm,
+  getDisconnectAction,
+  REATTACH_GRACE_MS,
+  type TermBufferState,
+} from "./sessionLifecycle.js";
 
 interface PendingConfirmation {
   actionId: string;
@@ -18,17 +22,19 @@ interface PendingConfirmation {
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface ClientState {
-  authenticated: boolean;
+interface ClientState extends TermBufferState {
   currentProcess: ChildProcess | null;
   currentRunId: string | null;
   currentRequestId: string | null;
   runStartedAt: number | null;
   pendingConfirmation: PendingConfirmation | null;
   lastError: string | null;
+  detachedStopTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const clients = new Map<WebSocket, ClientState>();
+const session = createClientState();
+let activeWs: WebSocket | null = null;
 
 export function getActiveClientCount(): number {
   return clients.size;
@@ -36,17 +42,17 @@ export function getActiveClientCount(): number {
 
 function createClientState(): ClientState {
   return {
-    authenticated: false,
     currentProcess: null,
     currentRunId: null,
     currentRequestId: null,
     runStartedAt: null,
     pendingConfirmation: null,
     lastError: null,
+    detachedStopTimer: null,
+    termBuffer: [],
+    termBufferChars: 0,
   };
 }
-
-// ── Send helpers ──
 
 function send(ws: WebSocket, message: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -54,17 +60,80 @@ function send(ws: WebSocket, message: ServerMessage): void {
   }
 }
 
-function sendTerm(ws: WebSocket, text: string): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "term", text }));
+function sendActive(message: ServerMessage): void {
+  if (activeWs?.readyState === WebSocket.OPEN) {
+    send(activeWs, message);
   }
 }
 
-function sendError(ws: WebSocket, message: string): void {
-  send(ws, { type: "server_error", message });
+function sendActiveTerm(state: ClientState, text: string): void {
+  if (activeWs?.readyState === WebSocket.OPEN) {
+    send(activeWs, { type: "term", text });
+    return;
+  }
+
+  appendBufferedTerm(state, text);
 }
 
-// ── Stop current run ──
+function sendActiveError(message: string): void {
+  sendActive({ type: "server_error", message });
+}
+
+function clearDetachTimer(state: ClientState): void {
+  if (state.detachedStopTimer) {
+    clearTimeout(state.detachedStopTimer);
+    state.detachedStopTimer = null;
+  }
+}
+
+function scheduleDetachedStop(state: ClientState): void {
+  clearDetachTimer(state);
+  state.detachedStopTimer = setTimeout(() => {
+    if (!activeWs && state.currentProcess) {
+      logger.warn("Stopping detached run after reattach grace expired", {
+        runId: state.currentRunId,
+        graceMs: REATTACH_GRACE_MS,
+      });
+      stopCurrentRun(state, "user_requested");
+    }
+  }, REATTACH_GRACE_MS);
+}
+
+function attachClient(ws: WebSocket, state: ClientState): void {
+  if (activeWs && activeWs !== ws && activeWs.readyState === WebSocket.OPEN) {
+    activeWs.close(1000, "Replaced by new authenticated client");
+  }
+
+  activeWs = ws;
+  clearDetachTimer(state);
+}
+
+function replaySession(ws: WebSocket, state: ClientState): void {
+  if (state.currentProcess && state.currentRunId && state.currentRequestId) {
+    send(ws, {
+      type: "run_started",
+      request_id: state.currentRequestId,
+      run_id: state.currentRunId,
+      timestamp: new Date().toISOString(),
+    });
+    send(ws, { type: "term", text: "\nReattached to running Claude session.\n" });
+  }
+
+  for (const text of state.termBuffer) {
+    send(ws, { type: "term", text });
+  }
+  state.termBuffer = [];
+  state.termBufferChars = 0;
+}
+
+function cleanupDisconnectedState(state: ClientState): void {
+  clearDetachTimer(state);
+  if (state.pendingConfirmation) {
+    clearTimeout(state.pendingConfirmation.timer);
+    state.pendingConfirmation.resolve(false);
+    state.pendingConfirmation = null;
+  }
+}
 
 function stopCurrentRun(state: ClientState, reason: "user_requested" | "guardrails"): void {
   if (!state.currentProcess) return;
@@ -75,9 +144,7 @@ function stopCurrentRun(state: ClientState, reason: "user_requested" | "guardrai
   state.runStartedAt = null;
 }
 
-// ── Run Claude (raw terminal mode) ──
-
-function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId: string): void {
+function runClaude(state: ClientState, prompt: string, requestId: string): void {
   stopCurrentRun(state, "user_requested");
 
   const runId = uuidv4();
@@ -85,32 +152,30 @@ function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId:
   state.currentRequestId = requestId;
   state.runStartedAt = Date.now();
   state.lastError = null;
+  state.termBuffer = [];
+  state.termBufferChars = 0;
 
   logger.info("Launching Claude", { runId, requestId, prompt: prompt.slice(0, 200) });
 
-  // Echo the prompt — server is the single source of truth for display
-  sendTerm(ws, `\x1b[1m> ${prompt}\x1b[0m\n`);
-  send(ws, { type: "run_started", request_id: requestId, run_id: runId, timestamp: new Date().toISOString() });
+  sendActiveTerm(state, `\x1b[1m> ${prompt}\x1b[0m\n`);
+  sendActive({ type: "run_started", request_id: requestId, run_id: runId, timestamp: new Date().toISOString() });
 
   const child = spawnClaude(prompt);
   state.currentProcess = child;
 
-  // Pipe stdout directly to client as terminal output
   if (child.stdout) {
     child.stdout.on("data", (chunk: Buffer) => {
-      sendTerm(ws, chunk.toString());
+      sendActiveTerm(state, chunk.toString());
     });
   }
 
-  // Pipe stderr — mark as dim/red in the terminal
   if (child.stderr) {
     child.stderr.on("data", (chunk: Buffer) => {
       state.lastError = chunk.toString();
-      sendTerm(ws, `\x1b[2m${chunk.toString()}\x1b[0m`);
+      sendActiveTerm(state, `\x1b[2m${chunk.toString()}\x1b[0m`);
     });
   }
 
-  // Process exit
   child.on("exit", (code) => {
     const duration = state.runStartedAt ? Date.now() - state.runStartedAt : 0;
     state.currentProcess = null;
@@ -119,12 +184,12 @@ function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId:
 
     if (code === 0 || code === null) {
       logger.info("Run completed", { runId, requestId, durationMs: duration });
-      sendTerm(ws, `\n✓ Completed in ${(duration / 1000).toFixed(1)}s\n`);
-      send(ws, { type: "run_completed", request_id: requestId, result: "", num_turns: 0, duration_ms: duration, usage: {} });
+      sendActiveTerm(state, `\nCompleted in ${(duration / 1000).toFixed(1)}s\n`);
+      sendActive({ type: "run_completed", request_id: requestId, result: "", num_turns: 0, duration_ms: duration, usage: {} });
     } else {
       logger.error("Run failed", { runId, requestId, exitCode: code, durationMs: duration });
-      sendTerm(ws, `\n✗ Exited with code ${code}\n`);
-      send(ws, { type: "run_failed", request_id: requestId, error: `Exit code ${code}`, code: `EXIT_${code}` });
+      sendActiveTerm(state, `\nExited with code ${code}\n`);
+      sendActive({ type: "run_failed", request_id: requestId, error: `Exit code ${code}`, code: `EXIT_${code}` });
     }
   });
 
@@ -134,56 +199,58 @@ function runClaude(ws: WebSocket, state: ClientState, prompt: string, requestId:
       state.currentProcess = null;
       state.currentRunId = null;
       state.runStartedAt = null;
-      sendTerm(ws, `\n✗ Spawn failed: ${err.message}\n`);
-      send(ws, { type: "run_failed", request_id: requestId, error: err.message, code: "SPAWN_ERROR" });
+      sendActiveTerm(state, `\nSpawn failed: ${err.message}\n`);
+      sendActive({ type: "run_failed", request_id: requestId, error: err.message, code: "SPAWN_ERROR" });
     }
   });
 }
 
-// ── Quick actions ──
-
-async function handleQuickAction(ws: WebSocket, state: ClientState, action: string, requestId: string): Promise<void> {
+async function handleQuickAction(state: ClientState, action: string, requestId: string): Promise<void> {
   logger.info("Quick action", { action, requestId });
 
   switch (action) {
     case "continue":
-      runClaude(ws, state, "Continue from where you left off.", requestId);
+      runClaude(state, "Continue from where you left off.", requestId);
       break;
     case "run_tests":
-      runClaude(ws, state, "Run the project's test suite, summarize failures, and fix them if safe.", requestId);
+      runClaude(state, "Run the project's test suite, summarize failures, and fix them if safe.", requestId);
       break;
     case "git_diff":
       try {
         const diff = await runGitDiff(appConfig.projectDir);
-        sendTerm(ws, `\n${diff.stats}\n\n${diff.diff.slice(0, 8000)}\n`);
+        sendActiveTerm(state, `\n${diff.stats}\n\n${diff.diff.slice(0, 8000)}\n`);
       } catch (err) {
-        sendError(ws, `Git diff failed: ${err instanceof Error ? err.message : String(err)}`);
+        sendActiveError(`Git diff failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       break;
     case "explain_error":
       if (!state.lastError) {
-        sendError(ws, "No previous error to explain.");
+        sendActiveError("No previous error to explain.");
       } else {
-        runClaude(ws, state, `The last command produced this error:\n\n${state.lastError}\n\nExplain what went wrong and propose the smallest safe fix.`, requestId);
+        runClaude(
+          state,
+          `The last command produced this error:\n\n${state.lastError}\n\nExplain what went wrong and propose the smallest safe fix.`,
+          requestId
+        );
       }
       break;
     case "commit":
-      await handleCommitAction(ws, state, requestId);
+      await handleCommitAction(state, requestId);
       break;
     case "revert":
-      await handleRevertAction(ws, state, requestId);
+      await handleRevertAction(state, requestId);
       break;
     default:
-      sendError(ws, `Unknown quick action: ${action}`);
+      sendActiveError(`Unknown quick action: ${action}`);
   }
 }
 
-async function handleCommitAction(ws: WebSocket, state: ClientState, requestId: string): Promise<void> {
+async function handleCommitAction(state: ClientState, requestId: string): Promise<void> {
   try {
     const result = await runCommit(appConfig.projectDir);
     if (result.needsConfirmation) {
       const actionId = uuidv4();
-      send(ws, {
+      sendActive({
         type: "confirmation_required",
         action_id: actionId,
         request_id: requestId,
@@ -197,41 +264,41 @@ async function handleCommitAction(ws: WebSocket, state: ClientState, requestId: 
           if (approved) {
             try {
               const r = await runCommit(appConfig.projectDir, true);
-              sendTerm(ws, `\n${r.commitMessage || "Committed."}\n`);
+              sendActiveTerm(state, `\n${r.commitMessage || "Committed."}\n`);
             } catch (err) {
-              sendError(ws, `Commit failed: ${err instanceof Error ? err.message : String(err)}`);
+              sendActiveError(`Commit failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            sendTerm(ws, "\nCommit cancelled.\n");
+            sendActiveTerm(state, "\nCommit cancelled.\n");
           }
         },
         timer: setTimeout(() => {
           if (state.pendingConfirmation?.actionId === actionId) {
             state.pendingConfirmation.resolve(false);
-            sendError(ws, "Confirmation timed out.");
+            sendActiveError("Confirmation timed out.");
           }
         }, 60_000),
       };
     } else if (result.committed) {
-      sendTerm(ws, `\n${result.commitMessage || "Committed."}\n`);
+      sendActiveTerm(state, `\n${result.commitMessage || "Committed."}\n`);
     } else {
-      sendError(ws, result.error || "Nothing to commit.");
+      sendActiveError(result.error || "Nothing to commit.");
     }
   } catch (err) {
-    sendError(ws, `Commit failed: ${err instanceof Error ? err.message : String(err)}`);
+    sendActiveError(`Commit failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-async function handleRevertAction(ws: WebSocket, state: ClientState, requestId: string): Promise<void> {
+async function handleRevertAction(state: ClientState, requestId: string): Promise<void> {
   if (!appConfig.allowDestructiveActions) {
-    sendError(ws, "Revert disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env");
+    sendActiveError("Revert disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env");
     return;
   }
   try {
     const result = await runRevert(appConfig.projectDir);
     if (result.needsConfirmation) {
       const actionId = uuidv4();
-      send(ws, {
+      sendActive({
         type: "confirmation_required",
         action_id: actionId,
         request_id: requestId,
@@ -245,31 +312,30 @@ async function handleRevertAction(ws: WebSocket, state: ClientState, requestId: 
           if (approved) {
             try {
               const r = await runRevert(appConfig.projectDir, true);
-              sendTerm(ws, `\n${r.message || "Reverted."}\n`);
+              sendActiveTerm(state, `\n${r.message || "Reverted."}\n`);
             } catch (err) {
-              sendError(ws, `Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+              sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            sendTerm(ws, "\nRevert cancelled.\n");
+            sendActiveTerm(state, "\nRevert cancelled.\n");
           }
         },
         timer: setTimeout(() => {
           if (state.pendingConfirmation?.actionId === actionId) {
             state.pendingConfirmation.resolve(false);
-            sendError(ws, "Confirmation timed out.");
+            sendActiveError("Confirmation timed out.");
           }
         }, 60_000),
       };
     }
   } catch (err) {
-    sendError(ws, `Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-// ── WebSocket connection handler ──
-
 export function handleConnection(ws: WebSocket): void {
-  const state = createClientState();
+  const state = session;
+  let authenticated = false;
   clients.set(ws, state);
   logger.info("Client connected", { total: clients.size });
 
@@ -278,17 +344,26 @@ export function handleConnection(ws: WebSocket): void {
     if (!rawStr) return;
 
     let data: unknown;
-    try { data = JSON.parse(rawStr); } catch { return; }
+    try {
+      data = JSON.parse(rawStr);
+    } catch {
+      return;
+    }
 
     const message = parseClientMessage(data);
-    if (!message) { logger.debug("Unknown message format", { raw: rawStr.slice(0, 200) }); return; }
+    if (!message) {
+      logger.debug("Unknown message format", { raw: rawStr.slice(0, 200) });
+      return;
+    }
 
     if (message.type === "auth") {
       if (message.token === appConfig.remoteToken) {
-        state.authenticated = true;
+        authenticated = true;
+        attachClient(ws, state);
         logger.info("Client authenticated");
         send(ws, { type: "auth_ok", session: uuidv4(), server_version: "1.0.0", model: appConfig.model });
-        sendTerm(ws, `\x1b[1m● Connected\x1b[0m  model: ${appConfig.model}  cwd: ${appConfig.projectDir}\n\n`);
+        send(ws, { type: "term", text: `\x1b[1mConnected\x1b[0m  model: ${appConfig.model}  cwd: ${appConfig.projectDir}\n\n` });
+        replaySession(ws, state);
       } else {
         logger.warn("Auth failed");
         send(ws, { type: "auth_error", message: "Invalid token" });
@@ -296,48 +371,71 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    if (!state.authenticated) { sendError(ws, "Not authenticated."); return; }
+    if (!authenticated) {
+      send(ws, { type: "server_error", message: "Not authenticated." });
+      return;
+    }
 
     switch (message.type) {
       case "prompt": {
         const scan = scanPrompt(message.text);
-        if (!scan.safe) { sendError(ws, `Blocked: ${scan.reason}`); return; }
-        runClaude(ws, state, message.text, message.request_id);
+        if (!scan.safe) {
+          sendActiveError(`Blocked: ${scan.reason}`);
+          return;
+        }
+        runClaude(state, message.text, message.request_id);
         break;
       }
       case "stop":
         if (state.currentProcess) {
           stopCurrentRun(state, "user_requested");
-          send(ws, { type: "run_stopped", request_id: state.currentRequestId || "unknown", reason: "user_requested" });
-          sendTerm(ws, "\n⏹ Stopped\n");
+          sendActive({ type: "run_stopped", request_id: state.currentRequestId || "unknown", reason: "user_requested" });
+          sendActiveTerm(state, "\nStopped\n");
         }
         break;
       case "quick_action":
-        handleQuickAction(ws, state, message.action, message.request_id);
+        handleQuickAction(state, message.action, message.request_id);
         break;
       case "confirm_action":
         if (state.pendingConfirmation?.actionId === message.action_id) {
           clearTimeout(state.pendingConfirmation.timer);
           state.pendingConfirmation.resolve(message.approved);
         } else {
-          sendError(ws, "No matching confirmation.");
+          sendActiveError("No matching confirmation.");
         }
         break;
       case "get_status":
-        send(ws, { type: "status", connected: true, running: !!state.currentProcess, run_id: state.currentRunId, cwd: appConfig.projectDir, model: appConfig.model });
+        send(ws, {
+          type: "status",
+          connected: true,
+          running: !!state.currentProcess,
+          run_id: state.currentRunId,
+          cwd: appConfig.projectDir,
+          model: appConfig.model,
+        });
         break;
     }
   });
 
   ws.on("close", () => {
-    if (state.currentProcess) stopCurrentRun(state, "user_requested");
-    if (state.pendingConfirmation) { clearTimeout(state.pendingConfirmation.timer); state.pendingConfirmation.resolve(false); }
     clients.delete(ws);
+    if (activeWs === ws) {
+      activeWs = null;
+      const action = getDisconnectAction({ hasCurrentProcess: !!state.currentProcess });
+      if (action === "detach") {
+        logger.warn("Client disconnected during active run; waiting for reattach", {
+          runId: state.currentRunId,
+          graceMs: REATTACH_GRACE_MS,
+        });
+        scheduleDetachedStop(state);
+      } else {
+        cleanupDisconnectedState(state);
+      }
+    }
     logger.info("Client disconnected", { total: clients.size });
   });
 
   ws.on("error", (err) => {
     logger.error("WebSocket error", { error: err.message });
-    clients.delete(ws);
   });
 }

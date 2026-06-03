@@ -4,6 +4,7 @@
 - Moved the prompt bar above Android system navigation by applying the bottom safe-area inset.
 - Added an explicit Android keyboard-height spacer so the prompt bar moves above Samsung keyboards.
 - Switched Android keyboard layout mode to pan while the app handles the prompt offset itself.
+- Kept Claude runs alive across brief WebSocket drops and reattached after reconnecting.
 - Suppressed noisy `Connection lost (NORMAL)` UI messages from normal WebSocket closes.
 - Replaced sockets no longer mark the app disconnected or schedule reconnects after a newer socket is already active.
 - Abnormal unintentional closes still show an error and reconnect.
