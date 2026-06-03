@@ -1,3 +1,28 @@
+## v1.0.3-alpha - Session persistence & conversation caching
+
+### Server
+- Removed `--no-session-persistence` from the Claude spawn so every prompt from the
+  mobile app creates a persistent, resumable session on disk.  Sessions can be
+  resumed from the desktop with `claude -r <session-id>` or `claude --continue`.
+
+### Mobile
+- Conversation output (`messages`) is now persisted to AsyncStorage so the log
+  survives app restarts.  Capped at 200 latest entries; oldest messages are
+  trimmed automatically.
+- Added `lastSessionId` tracking so the app remembers which Claude session the
+  current conversation is linked to.  `clearMessages` resets both the log and the
+  session pointer.
+
+### Build
+```bash
+cd mobile/android
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+```
+
+APK: `mobile/android/app/build/outputs/apk/release/app-release.apk`
+
+---
+
 ## v1.0.2-alpha - Tailscale connection test build
 
 ### Patch update
