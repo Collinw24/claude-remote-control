@@ -1,5 +1,10 @@
 ## v1.0.2-alpha - Tailscale connection test build
 
+### Patch update
+- Suppressed noisy `Connection lost (NORMAL)` UI messages from normal WebSocket closes.
+- Replaced sockets no longer mark the app disconnected or schedule reconnects after a newer socket is already active.
+- Abnormal unintentional closes still show an error and reconnect.
+
 ### Connection fixes
 - Default backend URL now points at the current Tailscale server: `ws://100.81.211.88:3001`.
 - Backend URL and token persist locally with AsyncStorage, so the app no longer falls back to the Android emulator URL.
