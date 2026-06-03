@@ -9,10 +9,9 @@ import {
   StatusBar,
   FlatList,
   KeyboardAvoidingView,
-  Keyboard,
   Platform,
 } from "react-native";
-import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context";
+import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWebSocket } from "./src/hooks/useWebSocket";
 import { useAppStore } from "./src/state/store";
 
@@ -46,11 +45,19 @@ const COMMANDS: Command[] = [
 ];
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <RemoteControlApp />
+    </SafeAreaProvider>
+  );
+}
+
+function RemoteControlApp() {
   const { connect, disconnect } = useWebSocket();
   const [input, setInput] = useState("");
   const [selectedCmdIdx, setSelectedCmdIdx] = useState(0);
-  const [kbHeight, setKbHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
+  const insets = useSafeAreaInsets();
 
   const backendUrl = useAppStore((s) => s.backendUrl);
   const setBackendUrl = useAppStore((s) => s.setBackendUrl);
@@ -65,6 +72,7 @@ export default function App() {
 
   const isConnected = connectionStatus === "connected";
   const isRunning = runStatus === "running";
+  const footerBottomPadding = Math.max(10, insets.bottom + 10);
 
   // Auto-scroll when messages change
   useEffect(() => {
@@ -72,17 +80,6 @@ export default function App() {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 50);
     }
   }, [messages.length]);
-
-  // Keyboard listener — track height for manual padding on Android
-  useEffect(() => {
-    const show = Keyboard.addListener("keyboardDidShow", (e) => {
-      setKbHeight(e.endCoordinates.height);
-    });
-    const hide = Keyboard.addListener("keyboardDidHide", () => {
-      setKbHeight(0);
-    });
-    return () => { show.remove(); hide.remove(); };
-  }, []);
 
   // Filtered command suggestions
   const showSuggestions = input.startsWith("/") && !input.includes(" ");
@@ -158,8 +155,11 @@ export default function App() {
   const projectName = "claude";
 
   return (
-    <SafeAreaProvider>
-    <SafeAreaView style={S.shell} edges={["top"]}>
+    <SafeAreaView style={S.shell} edges={["top", "left", "right"]}>
+      <KeyboardAvoidingView
+        style={S.keyboardAvoider}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
       <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
 
       {/* ── Header ── */}
@@ -291,7 +291,7 @@ export default function App() {
       </ScrollView>
 
       {/* ── Prompt ── */}
-      <View style={[S.footer, { paddingBottom: Math.max(10, kbHeight > 0 ? kbHeight - 20 : 10) }]}>
+      <View style={[S.footer, { paddingBottom: footerBottomPadding }]}>
         {showSuggestions && filteredCmds.length > 0 && (
           <View style={S.suggestPopup}>
             <FlatList
@@ -348,8 +348,8 @@ export default function App() {
           )}
         </View>
       </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
-    </SafeAreaProvider>
   );
 }
 
@@ -393,6 +393,9 @@ const S = StyleSheet.create({
   shell: {
     flex: 1,
     backgroundColor: "#0d1117",
+  },
+  keyboardAvoider: {
+    flex: 1,
   },
 
   header: {

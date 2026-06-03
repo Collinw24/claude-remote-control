@@ -1,6 +1,8 @@
 ## v1.0.2-alpha - Tailscale connection test build
 
 ### Patch update
+- Moved the prompt bar above Android system navigation by applying the bottom safe-area inset.
+- Wrapped the app shell in `KeyboardAvoidingView` so the prompt stays visible while the keyboard is open.
 - Suppressed noisy `Connection lost (NORMAL)` UI messages from normal WebSocket closes.
 - Replaced sockets no longer mark the app disconnected or schedule reconnects after a newer socket is already active.
 - Abnormal unintentional closes still show an error and reconnect.
