@@ -2,7 +2,8 @@
 
 ### Patch update
 - Moved the prompt bar above Android system navigation by applying the bottom safe-area inset.
-- Wrapped the app shell in `KeyboardAvoidingView` so the prompt stays visible while the keyboard is open.
+- Added an explicit Android keyboard-height spacer so the prompt bar moves above Samsung keyboards.
+- Switched Android keyboard layout mode to pan while the app handles the prompt offset itself.
 - Suppressed noisy `Connection lost (NORMAL)` UI messages from normal WebSocket closes.
 - Replaced sockets no longer mark the app disconnected or schedule reconnects after a newer socket is already active.
 - Abnormal unintentional closes still show an error and reconnect.

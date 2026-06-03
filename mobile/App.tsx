@@ -9,11 +9,13 @@ import {
   StatusBar,
   FlatList,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
 } from "react-native";
 import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWebSocket } from "./src/hooks/useWebSocket";
 import { useAppStore } from "./src/state/store";
+import { getPromptBottomInset } from "./src/utils/keyboardLayout";
 
 interface Command {
   cmd: string;
@@ -56,6 +58,7 @@ function RemoteControlApp() {
   const { connect, disconnect } = useWebSocket();
   const [input, setInput] = useState("");
   const [selectedCmdIdx, setSelectedCmdIdx] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
 
@@ -72,7 +75,10 @@ function RemoteControlApp() {
 
   const isConnected = connectionStatus === "connected";
   const isRunning = runStatus === "running";
-  const footerBottomPadding = Math.max(10, insets.bottom + 10);
+  const footerBottomPadding = getPromptBottomInset({
+    keyboardHeight,
+    safeAreaBottom: insets.bottom,
+  });
 
   // Auto-scroll when messages change
   useEffect(() => {
@@ -80,6 +86,19 @@ function RemoteControlApp() {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 50);
     }
   }, [messages.length]);
+
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", (event) => {
+      setKeyboardHeight(event.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   // Filtered command suggestions
   const showSuggestions = input.startsWith("/") && !input.includes(" ");
