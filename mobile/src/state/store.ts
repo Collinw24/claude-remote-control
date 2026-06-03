@@ -1,9 +1,11 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { DEFAULT_BACKEND_URL } from "../utils/connection";
 import type {
   ConnectionStatus,
   RunStatus,
   LogEntry,
-  ConfirmationRequiredMessage,
 } from "../types";
 
 // Generate a simple unique ID (no uuid dependency needed on mobile)
@@ -51,43 +53,55 @@ interface AppState {
   setSendMessage: (fn: ((msg: Record<string, unknown>) => void) | null) => void;
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
-  // Connection
-  backendUrl: "ws://10.0.2.2:3001",
-  setBackendUrl: (url) => set({ backendUrl: url }),
-  token: "testtoken",
-  setToken: (token) => set({ token }),
-  connectionStatus: "disconnected",
-  setConnectionStatus: (status) => set({ connectionStatus: status }),
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
+      // Connection
+      backendUrl: DEFAULT_BACKEND_URL,
+      setBackendUrl: (url) => set({ backendUrl: url }),
+      token: "",
+      setToken: (token) => set({ token }),
+      connectionStatus: "disconnected",
+      setConnectionStatus: (status) => set({ connectionStatus: status }),
 
-  // Run
-  runStatus: "idle",
-  setRunStatus: (status) => set({ runStatus: status }),
-  runId: null,
-  setRunId: (id) => set({ runId: id }),
-  serverModel: "",
-  setServerModel: (model) => set({ serverModel: model }),
+      // Run
+      runStatus: "idle",
+      setRunStatus: (status) => set({ runStatus: status }),
+      runId: null,
+      setRunId: (id) => set({ runId: id }),
+      serverModel: "",
+      setServerModel: (model) => set({ serverModel: model }),
 
-  // Output log
-  messages: [],
-  addMessage: (entry) => {
-    const id = uid();
-    set((s) => ({
-      messages: [...s.messages, { ...entry, id }],
-    }));
-    return id;
-  },
-  removeMessage: (id) =>
-    set((s) => ({
-      messages: s.messages.filter((m) => m.id !== id),
-    })),
-  clearMessages: () => set({ messages: [] }),
+      // Output log
+      messages: [],
+      addMessage: (entry) => {
+        const id = uid();
+        set((s) => ({
+          messages: [...s.messages, { ...entry, id }],
+        }));
+        return id;
+      },
+      removeMessage: (id) =>
+        set((s) => ({
+          messages: s.messages.filter((m) => m.id !== id),
+        })),
+      clearMessages: () => set({ messages: [] }),
 
-  // Confirmation
-  pendingConfirmation: null,
-  setPendingConfirmation: (conf) => set({ pendingConfirmation: conf }),
+      // Confirmation
+      pendingConfirmation: null,
+      setPendingConfirmation: (conf) => set({ pendingConfirmation: conf }),
 
-  // Send
-  sendMessage: null,
-  setSendMessage: (fn) => set({ sendMessage: fn }),
-}));
+      // Send
+      sendMessage: null,
+      setSendMessage: (fn) => set({ sendMessage: fn }),
+    }),
+    {
+      name: "claude-remote-control",
+      storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        backendUrl: state.backendUrl,
+        token: state.token,
+      }),
+    }
+  )
+);

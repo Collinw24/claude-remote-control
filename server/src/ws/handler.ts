@@ -324,7 +324,8 @@ export function handleConnection(ws: WebSocket): void {
         }
         break;
       case "get_status":
-        break; // status is shown via term messages now
+        send(ws, { type: "status", connected: true, running: !!state.currentProcess, run_id: state.currentRunId, cwd: appConfig.projectDir, model: appConfig.model });
+        break;
     }
   });
 

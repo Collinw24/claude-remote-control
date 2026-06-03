@@ -1,51 +1,117 @@
-import { useRef, useCallback } from "react";
-import { Platform } from "react-native";
+import { useRef, useCallback, useEffect } from "react";
+import { Platform, AppState, Dimensions } from "react-native";
 import { useAppStore } from "../state/store";
-import type { ServerMessage, ClientMessage } from "../types";
+import type { ServerMessage } from "../types";
+import { normalizeBackendUrl, validateBackendUrl } from "../utils/connection";
 
-const HEARTBEAT_INTERVAL = 30_000;
+const HEARTBEAT_INTERVAL = 15_000;
+const PONG_TIMEOUT = 45_000;
 const RECONNECT_BASE_DELAY = 1_000;
-const RECONNECT_MAX_DELAY = 30_000;
+const RECONNECT_MAX_DELAY = 15_000;
+
+function ts(): string {
+  return new Date().toISOString().slice(11, 23);
+}
+
+function now(): number {
+  return Date.now();
+}
+
+const WS_STATE: Record<number, string> = { 0: "CONNECTING", 1: "OPEN", 2: "CLOSING", 3: "CLOSED" };
+
+// ── Console-only diagnostic ring (view via adb logcat) ──
+
+const RING_SIZE = 500;
+const diagRing: string[] = [];
+
+function diag(msg: string): void {
+  const line = `[WS ${ts()}] ${msg}`;
+  diagRing.push(line);
+  if (diagRing.length > RING_SIZE) diagRing.shift();
+  console.log(line);
+}
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pongTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
   const thinkingIdRef = useRef<string | null>(null);
+  const lastMessageTime = useRef(now());
+  const heartbeatCount = useRef(0);
+  const lastHbSent = useRef(0);
+  const msgCount = useRef(0);
+  const bytesReceived = useRef(0);
+  const connectRef = useRef<() => void>(() => {});
 
   const {
     backendUrl,
     token,
+    setBackendUrl,
     setConnectionStatus,
     setRunStatus,
     setRunId,
     setServerModel,
     addMessage,
     removeMessage,
-    clearMessages,
     setPendingConfirmation,
     setSendMessage,
   } = useAppStore();
 
-  const sendJson = useCallback((msg: Record<string, unknown>) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-    }
-  }, []);
+  // ── Visible UI message (only for important events) ──
+
+  const uiMsg = useCallback(
+    (text: string, type: "system" | "error" = "system") => {
+      addMessage({
+        timestamp: new Date().toISOString(),
+        type,
+        content: text,
+      });
+    },
+    [addMessage]
+  );
+
+  const sendJson = useCallback(
+    (msg: Record<string, unknown>) => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        const raw = JSON.stringify(msg);
+        diag(`>> SEND ${msg.type} · ${raw.length}B`);
+        ws.send(raw);
+      } else {
+        diag(`>> DROP ${msg.type} · ws=${WS_STATE[ws?.readyState ?? 3]}`);
+      }
+    },
+    []
+  );
 
   const handleMessage = useCallback(
     (event: MessageEvent) => {
+      const receivedAt = now();
+      lastMessageTime.current = receivedAt;
+      msgCount.current++;
+      const raw = event.data as string;
+      bytesReceived.current += raw.length;
+
       let data: ServerMessage;
       try {
-        data = JSON.parse(event.data as string);
+        data = JSON.parse(raw);
       } catch {
+        diag(`<< RAW (non-JSON) · ${raw.length}B · ${raw.slice(0, 80)}`);
         return;
       }
 
+      const elapsed = receivedAt - lastHbSent.current;
+      diag(
+        `<< RECV ${data.type} · ${raw.length}B · #${msgCount.current}` +
+          (data.type === "status" ? ` · rtt=${elapsed}ms` : "")
+      );
+
       switch (data.type) {
         case "auth_ok":
+          diag(`AUTH OK · session=${data.session.slice(0, 8)}… · model=${data.model}`);
           setConnectionStatus("connected");
           setServerModel(data.model);
           setSendMessage(sendJson);
@@ -53,16 +119,12 @@ export function useWebSocket() {
           break;
 
         case "auth_error":
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "error",
-            content: `Auth failed: ${data.message}`,
-          });
+          diag(`AUTH ERROR: ${data.message}`);
+          uiMsg(`Auth failed: ${data.message}`, "error");
           setConnectionStatus("disconnected");
           break;
 
         case "term": {
-          // Remove thinking indicator on first real output (skip blank/whitespace-only chunks)
           if (thinkingIdRef.current && data.text.trim().length > 0) {
             removeMessage(thinkingIdRef.current);
             thinkingIdRef.current = null;
@@ -76,14 +138,13 @@ export function useWebSocket() {
         }
 
         case "status":
-          setRunStatus(data.running ? "running" : "idle");
-          if (data.run_id) setRunId(data.run_id);
+          heartbeatCount.current++;
           break;
 
         case "run_started":
           setRunStatus("running");
           setRunId(data.run_id);
-          // Show thinking indicator until first output arrives
+          diag(`RUN STARTED · ${data.run_id.slice(0, 8)}…`);
           thinkingIdRef.current = addMessage({
             timestamp: new Date().toISOString(),
             type: "thinking",
@@ -104,7 +165,6 @@ export function useWebSocket() {
         }
 
         case "agent_error":
-          // stderr lines — show as errors
           addMessage({
             timestamp: new Date().toISOString(),
             type: "error",
@@ -156,80 +216,183 @@ export function useWebSocket() {
           break;
 
         case "server_error":
-          addMessage({
-            timestamp: new Date().toISOString(),
-            type: "error",
-            content: `🛑 Server error: ${data.message}`,
-          });
+          diag(`SERVER ERROR: ${data.message}`);
+          uiMsg(`Server: ${data.message}`, "error");
           break;
+
+        default:
+          diag(`<< UNKNOWN type="${(data as any).type}" · ${raw.slice(0, 120)}`);
       }
     },
-    [setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, removeMessage, setPendingConfirmation, setSendMessage, sendJson]
+    [uiMsg, setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, removeMessage, setPendingConfirmation, setSendMessage, sendJson]
+  );
+
+  // ── Heartbeat / Pong (console-only logging) ──
+
+  const startHeartbeat = useCallback((ws: WebSocket) => {
+    heartbeatCount.current = 0;
+    heartbeatTimer.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        lastHbSent.current = now();
+        ws.send(JSON.stringify({ type: "get_status" }));
+        diag(`>> HB sent`);
+      }
+    }, HEARTBEAT_INTERVAL);
+  }, []);
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimer.current) {
+      clearInterval(heartbeatTimer.current);
+      heartbeatTimer.current = null;
+    }
+  }, []);
+
+  const startPongTimer = useCallback(() => {
+    if (pongTimer.current) clearTimeout(pongTimer.current);
+    pongTimer.current = setTimeout(() => {
+      const since = now() - lastMessageTime.current;
+      diag(`PONG TIMEOUT · ${(since / 1000).toFixed(0)}s since last msg`);
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+    }, PONG_TIMEOUT);
+  }, []);
+
+  const stopPongTimer = useCallback(() => {
+    if (pongTimer.current) {
+      clearTimeout(pongTimer.current);
+      pongTimer.current = null;
+    }
+  }, []);
+
+  // ── Connection lifecycle ──
+
+  const doDisconnect = useCallback(
+    (intentional: boolean, trigger: string) => {
+      diag(
+        `DISCONNECT · intentional=${intentional} · trigger=${trigger} · hb=${heartbeatCount.current} · msgs=${msgCount.current}`
+      );
+      intentionalClose.current = intentional;
+      stopHeartbeat();
+      stopPongTimer();
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      setConnectionStatus("disconnected");
+      setSendMessage(null);
+      setRunStatus("idle");
+      setRunId(null);
+    },
+    [stopHeartbeat, stopPongTimer, setConnectionStatus, setSendMessage, setRunStatus, setRunId]
   );
 
   const connect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
+    const prev = wsRef.current;
+    if (prev) {
+      diag(`CONNECT · replacing ws=${WS_STATE[prev.readyState]}`);
+      prev.close();
+    }
+
+    const validationError = validateBackendUrl(backendUrl);
+    if (validationError) {
+      uiMsg(validationError, "error");
+      setConnectionStatus("disconnected");
+      return;
+    }
+
+    const normalizedBackendUrl = normalizeBackendUrl(backendUrl);
+    if (normalizedBackendUrl !== backendUrl) {
+      setBackendUrl(normalizedBackendUrl);
     }
 
     intentionalClose.current = false;
     setConnectionStatus("connecting");
+    lastMessageTime.current = now();
+    msgCount.current = 0;
+    bytesReceived.current = 0;
+    heartbeatCount.current = 0;
+    lastHbSent.current = 0;
+
+    const { width, height } = Dimensions.get("window");
+    diag(
+      `CONNECT · url=${normalizedBackendUrl} · platform=${Platform.OS}/${Platform.Version} · ${width}x${height}`
+    );
 
     try {
-      const ws = new WebSocket(backendUrl);
+      const ws = new WebSocket(normalizedBackendUrl);
       wsRef.current = ws;
+      diag(`WS created · readyState=${WS_STATE[ws.readyState]}`);
 
       ws.onopen = () => {
-        // Send auth immediately
+        diag(`WS OPEN · sending auth`);
         ws.send(JSON.stringify({ type: "auth", token }));
-        addMessage({
-          timestamp: new Date().toISOString(),
-          type: "system",
-          content: "Connecting to server...",
-        });
       };
 
-      ws.onmessage = handleMessage;
-
-      ws.onerror = (err) => {
-        console.warn("WebSocket error", err);
+      ws.onmessage = (event) => {
+        handleMessage(event);
+        startPongTimer();
       };
 
-      ws.onclose = () => {
-        setConnectionStatus("disconnected");
-        setSendMessage(null);
-        stopHeartbeat();
+      ws.onerror = () => {
+        diag(`WS ERROR · readyState=${WS_STATE[ws.readyState]}`);
+      };
 
+      ws.onclose = (event) => {
+        const { code, reason, wasClean } = event as CloseEvent;
+        const codeLabel =
+          code === 1000 ? "NORMAL" :
+          code === 1001 ? "GOING_AWAY" :
+          code === 1005 ? "NO_STATUS" :
+          code === 1006 ? "ABNORMAL" :
+          `code_${code}`;
+
+        diag(`WS CLOSE · ${codeLabel} · clean=${wasClean}` + (reason ? ` · reason=${reason}` : ""));
+
+        if (!intentionalClose.current) {
+          uiMsg(`Connection lost (${codeLabel})`, "error");
+        }
+
+        doDisconnect(false, `ws.onclose ${codeLabel}`);
         if (!intentionalClose.current) {
           scheduleReconnect();
         }
       };
 
       startHeartbeat(ws);
+      startPongTimer();
     } catch (err) {
-      setConnectionStatus("disconnected");
-      addMessage({
-        timestamp: new Date().toISOString(),
-        type: "error",
-        content: `Connection failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      const msg = err instanceof Error ? err.message : String(err);
+      diag(`CONNECT EXCEPTION: ${msg}`);
+      uiMsg(`Connection failed: ${msg}`, "error");
+      doDisconnect(false, `exception: ${msg}`);
     }
-  }, [backendUrl, token, handleMessage, setConnectionStatus, setSendMessage, addMessage]);
+  }, [backendUrl, token, setBackendUrl, uiMsg, handleMessage, startPongTimer, startHeartbeat, doDisconnect, setConnectionStatus]);
+
+  // ── AppState ──
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      const ws = wsRef.current;
+      diag(`APPSTATE ${state} · ws=${WS_STATE[ws?.readyState ?? 3]}`);
+      if (state === "active" && !intentionalClose.current) {
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          diag("APPSTATE dead socket — reconnect");
+          reconnectAttempts.current = 0;
+          connectRef.current();
+        }
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   const disconnect = useCallback(() => {
-    intentionalClose.current = true;
-    stopHeartbeat();
-    if (reconnectTimer.current) {
-      clearTimeout(reconnectTimer.current);
-      reconnectTimer.current = null;
-    }
+    doDisconnect(true, "user disconnect");
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
-    setConnectionStatus("disconnected");
-    setSendMessage(null);
-  }, [setConnectionStatus, setSendMessage]);
+  }, [doDisconnect]);
 
   const scheduleReconnect = useCallback(() => {
     const delay = Math.min(
@@ -237,39 +400,21 @@ export function useWebSocket() {
       RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts.current)
     );
     reconnectAttempts.current++;
-
-    addMessage({
-      timestamp: new Date().toISOString(),
-      type: "system",
-      content: `Reconnecting in ${(delay / 1000).toFixed(0)}s... (attempt ${reconnectAttempts.current})`,
-    });
+    diag(`RECONNECT #${reconnectAttempts.current} in ${delay}ms`);
+    uiMsg(`Reconnecting in ${(delay / 1000).toFixed(0)}s…`);
 
     reconnectTimer.current = setTimeout(() => {
-      connect();
+      connectRef.current();
     }, delay);
-  }, [connect, addMessage]);
+  }, [uiMsg]);
 
-  const startHeartbeat = (ws: WebSocket) => {
-    heartbeatTimer.current = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "get_status" }));
-      }
-    }, HEARTBEAT_INTERVAL);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatTimer.current) {
-      clearInterval(heartbeatTimer.current);
-      heartbeatTimer.current = null;
-    }
-  };
+  connectRef.current = connect;
 
   return { connect, disconnect, sendJson };
 }
 
-/**
- * Convert an agent_output message to a readable string for the log.
- */
+// ── Formatting ──
+
 function formatAgentOutput(msg: ServerMessage & { type: "agent_output" }): string {
   switch (msg.content_type) {
     case "thinking":
@@ -307,7 +452,6 @@ function formatToolInput(name: string, input: Record<string, unknown>): string {
     const q = input.query as string;
     return q.length > 80 ? q.slice(0, 80) + "..." : q;
   }
-  // Generic: show keys
   const keys = Object.keys(input).join(", ");
   return keys || "(no input)";
 }

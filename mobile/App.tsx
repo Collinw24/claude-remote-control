@@ -8,15 +8,19 @@ import {
   StyleSheet,
   StatusBar,
   FlatList,
+  KeyboardAvoidingView,
+  Keyboard,
+  Platform,
 } from "react-native";
+import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context";
 import { useWebSocket } from "./src/hooks/useWebSocket";
 import { useAppStore } from "./src/state/store";
 
 interface Command {
-  cmd: string;       // e.g. "/diff"
-  desc: string;      // e.g. "Show git diff"
+  cmd: string;
+  desc: string;
   type: "quick_action" | "local" | "prompt";
-  action?: string;   // quick_action name or prompt text
+  action?: string;
 }
 
 const COMMANDS: Command[] = [
@@ -44,8 +48,8 @@ const COMMANDS: Command[] = [
 export default function App() {
   const { connect, disconnect } = useWebSocket();
   const [input, setInput] = useState("");
-  const [showConn, setShowConn] = useState(true);
   const [selectedCmdIdx, setSelectedCmdIdx] = useState(0);
+  const [kbHeight, setKbHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
 
   const backendUrl = useAppStore((s) => s.backendUrl);
@@ -62,22 +66,23 @@ export default function App() {
   const isConnected = connectionStatus === "connected";
   const isRunning = runStatus === "running";
 
+  // Auto-scroll when messages change
   useEffect(() => {
     if (scrollRef.current) {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 50);
     }
   }, [messages.length]);
 
+  // Keyboard listener — track height for manual padding on Android
   useEffect(() => {
-    if (isConnected) setShowConn(false);
-  }, [isConnected]);
-
-  // Auto-connect on mount if credentials are configured
-  useEffect(() => {
-    if (!isConnected && backendUrl && token) {
-      connect();
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    const show = Keyboard.addListener("keyboardDidShow", (e) => {
+      setKbHeight(e.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      setKbHeight(0);
+    });
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   // Filtered command suggestions
   const showSuggestions = input.startsWith("/") && !input.includes(" ");
@@ -87,7 +92,6 @@ export default function App() {
     return COMMANDS.filter((c) => c.cmd.toLowerCase().startsWith("/" + q));
   }, [input, showSuggestions]);
 
-  // Reset selection when filtered list changes
   useEffect(() => {
     setSelectedCmdIdx(0);
   }, [filteredCmds.length]);
@@ -100,14 +104,12 @@ export default function App() {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     if (text.startsWith("/")) {
-      // Check for quick_action commands first
       const action = mapCommand(text);
       if (action) {
         sendMessage({ type: "quick_action", action, request_id: id });
         setInput("");
         return;
       }
-      // Handle local commands
       if (text === "/clear" || text.startsWith("/clear")) {
         clearMessages();
         setInput("");
@@ -124,7 +126,6 @@ export default function App() {
         return;
       }
       if (text === "/help" || text.startsWith("/help")) {
-        // Show help by listing commands — send as prompt
         const helpText = COMMANDS.map((c) => `${c.cmd.padEnd(14)} ${c.desc}`).join("\n");
         sendMessage({ type: "prompt", text: `Available commands:\n${helpText}`, request_id: id });
         setInput("");
@@ -137,8 +138,8 @@ export default function App() {
   }, [input, sendMessage, clearMessages]);
 
   const handleConnect = useCallback(() => {
-    if (!isConnected && backendUrl && token) connect();
-  }, [isConnected, backendUrl, token, connect]);
+    if (backendUrl && token) connect();
+  }, [backendUrl, token, connect]);
 
   const handleStop = useCallback(() => {
     if (sendMessage) sendMessage({ type: "stop" });
@@ -154,11 +155,11 @@ export default function App() {
     [sendMessage, pendingConfirmation, setPendingConfirmation]
   );
 
-  // Derive project name from cwd
-  const projectName = "wdfabrik";
+  const projectName = "claude";
 
   return (
-    <View style={S.shell}>
+    <SafeAreaProvider>
+    <SafeAreaView style={S.shell} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
 
       {/* ── Header ── */}
@@ -172,7 +173,7 @@ export default function App() {
         <View style={S.headerRight}>
           {isRunning && <Text style={S.headerRunning}>⏺ running</Text>}
           {!isConnected ? (
-            <TouchableOpacity onPress={connect}>
+            <TouchableOpacity onPress={handleConnect}>
               <Text style={S.headerAction}>/connect</Text>
             </TouchableOpacity>
           ) : (
@@ -183,23 +184,20 @@ export default function App() {
         </View>
       </View>
 
-      {/* ── Connection panel (collapsible) ── */}
-      {showConn && !isConnected && (
+      {/* ── Connection panel ── */}
+      {!isConnected && (
         <View style={S.connPanel}>
           <Text style={S.connLabel}>backend</Text>
           <TextInput
             style={S.connInput}
             value={backendUrl}
             onChangeText={setBackendUrl}
-            placeholder="ws://10.0.2.2:3001"
+            placeholder="ws://192.168.1.X:3001"
             placeholderTextColor="#30363d"
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="next"
             blurOnSubmit={false}
-            onSubmitEditing={() => {
-              // move focus to token — handled by next field in tab order
-            }}
           />
           <Text style={S.connLabel}>token</Text>
           <TextInput
@@ -214,7 +212,7 @@ export default function App() {
             onSubmitEditing={handleConnect}
           />
           <TouchableOpacity
-            style={S.connectBtn}
+            style={[S.connectBtn, (!backendUrl || !token) && { opacity: 0.5 }]}
             onPress={handleConnect}
             disabled={!backendUrl || !token}
           >
@@ -223,18 +221,43 @@ export default function App() {
         </View>
       )}
 
+      {/* ── Status bar ── */}
+      <View style={S.statusBar}>
+        <Text style={S.statusText}>
+          {connectionStatus === "connected"
+            ? "● connected"
+            : connectionStatus === "connecting"
+              ? "◌ connecting…"
+              : "○ disconnected"}
+        </Text>
+        {connectionStatus === "connecting" && (
+          <Text style={S.statusDetail}>WebSocket handshake to {backendUrl}</Text>
+        )}
+      </View>
+
       {/* ── Conversation ── */}
-      <ScrollView ref={scrollRef} style={S.body} contentContainerStyle={S.bodyInner}>
+      <ScrollView
+        ref={scrollRef}
+        style={S.body}
+        contentContainerStyle={S.bodyInner}
+        keyboardShouldPersistTaps="always"
+        keyboardDismissMode="interactive"
+      >
         {messages.length === 0 ? (
           <View style={S.placeholder}>
             <Text style={S.placeholderLine}>claude code v1.0.0</Text>
             <Text style={S.placeholderLine}>model: deepseek-v4-pro</Text>
-            <Text style={S.placeholderLine}>cwd: ~/documents/claude/WDFabrik</Text>
+            <Text style={S.placeholderLine}>cwd: ~/documents/claude</Text>
             <Text style={S.placeholderMuted}>
               {isConnected
                 ? "\ntype a prompt to begin"
-                : "\nenter backend url and token, then /connect"}
+                : "\nenter your PC's LAN IP and token, then Connect"}
             </Text>
+            {!isConnected && (
+              <Text style={[S.placeholderMuted, { color: "#58a6ff", marginTop: 8 }]}>
+                Find your PC IP: open terminal → ipconfig → look for "IPv4 Address" under Wi-Fi
+              </Text>
+            )}
             <View style={S.cmdList}>
               {COMMANDS.map((c) => (
                 <Text key={c.cmd} style={S.cmdItem}>
@@ -251,7 +274,6 @@ export default function App() {
           ))
         )}
 
-        {/* Confirmation dialog */}
         {pendingConfirmation && (
           <View style={S.confirm}>
             <Text style={S.confirmTitle}>⚠ {pendingConfirmation.prompt}</Text>
@@ -269,8 +291,7 @@ export default function App() {
       </ScrollView>
 
       {/* ── Prompt ── */}
-      <View style={S.footer}>
-        {/* Command suggestions popup */}
+      <View style={[S.footer, { paddingBottom: Math.max(10, kbHeight > 0 ? kbHeight - 20 : 10) }]}>
         {showSuggestions && filteredCmds.length > 0 && (
           <View style={S.suggestPopup}>
             <FlatList
@@ -327,11 +348,10 @@ export default function App() {
           )}
         </View>
       </View>
-    </View>
+    </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
-
-// ── helpers ──
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]0;.*?\x07/g, "");
@@ -369,17 +389,12 @@ function msgStyle(m: { type: string; isError?: boolean }): object {
   }
 }
 
-// ── styles ──
-
 const S = StyleSheet.create({
   shell: {
     flex: 1,
     backgroundColor: "#0d1117",
-    paddingHorizontal: 0,
-    paddingTop: 0,
   },
 
-  // header
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -421,7 +436,6 @@ const S = StyleSheet.create({
     fontWeight: "600",
   },
 
-  // connection panel
   connPanel: {
     flexDirection: "row",
     alignItems: "center",
@@ -464,7 +478,29 @@ const S = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // body
+  // status bar
+  statusBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: "#0d1117",
+    borderBottomWidth: 1,
+    borderBottomColor: "#21262d",
+    gap: 12,
+  },
+  statusText: {
+    fontFamily: "monospace",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  statusDetail: {
+    color: "#8b949e",
+    fontFamily: "monospace",
+    fontSize: 10,
+    flex: 1,
+  },
+
   body: {
     flex: 1,
     paddingHorizontal: 16,
@@ -474,7 +510,6 @@ const S = StyleSheet.create({
     paddingBottom: 16,
   },
 
-  // placeholder
   placeholder: {
     paddingTop: 4,
   },
@@ -500,7 +535,6 @@ const S = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // confirmation
   confirm: {
     marginTop: 12,
     padding: 12,
@@ -540,7 +574,6 @@ const S = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // footer / prompt
   footer: {
     borderTopWidth: 1,
     borderTopColor: "#21262d",
@@ -580,7 +613,6 @@ const S = StyleSheet.create({
     fontSize: 12,
   },
 
-  // command suggestion popup
   suggestPopup: {
     backgroundColor: "#161b22",
     borderWidth: 1,
