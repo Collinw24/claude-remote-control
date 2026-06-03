@@ -31,6 +31,10 @@ const COMMANDS: Command[] = [
   { cmd: "/tests",     desc: "Run test suite, fix failures",    type: "quick_action", action: "run_tests" },
   { cmd: "/explain",   desc: "Explain the last error",          type: "quick_action", action: "explain_error" },
   { cmd: "/continue",  desc: "Continue from where you left off", type: "quick_action", action: "continue" },
+  { cmd: "/new",       desc: "Start a new session",             type: "local" },
+  { cmd: "/sessions",  desc: "List past sessions",              type: "local" },
+  { cmd: "/resume",    desc: "Resume a past session",           type: "local" },
+  { cmd: "/rename",    desc: "Rename current session",          type: "local" },
   { cmd: "/clear",     desc: "Clear the conversation",          type: "local" },
   { cmd: "/compact",   desc: "Compact context to save tokens",  type: "prompt", action: "/compact" },
   { cmd: "/config",    desc: "Show current configuration",      type: "prompt", action: "Show the current configuration and settings." },
@@ -72,6 +76,15 @@ function RemoteControlApp() {
   const pendingConfirmation = useAppStore((s) => s.pendingConfirmation);
   const setPendingConfirmation = useAppStore((s) => s.setPendingConfirmation);
   const sendMessage = useAppStore((s) => s.sendMessage);
+  // Session management
+  const sessions = useAppStore((s) => s.sessions);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const ensureSession = useAppStore((s) => s.ensureSession);
+  const switchSession = useAppStore((s) => s.switchSession);
+  const renameSession = useAppStore((s) => s.renameSession);
+  const deleteSession = useAppStore((s) => s.deleteSession);
+  const setLastPromptText = useAppStore((s) => s.setLastPromptText);
+  const clearMessages = useAppStore((s) => s.clearMessages);
 
   const isConnected = connectionStatus === "connected";
   const isRunning = runStatus === "running";
@@ -112,8 +125,6 @@ function RemoteControlApp() {
     setSelectedCmdIdx(0);
   }, [filteredCmds.length]);
 
-  const clearMessages = useAppStore((s) => s.clearMessages);
-
   const handleSend = useCallback(() => {
     const text = input.trim();
     if (!text || !sendMessage) return;
@@ -122,36 +133,83 @@ function RemoteControlApp() {
     if (text.startsWith("/")) {
       const action = mapCommand(text);
       if (action) {
+        setLastPromptText(text);
         sendMessage({ type: "quick_action", action, request_id: id });
         setInput("");
         return;
       }
-      if (text === "/clear" || text.startsWith("/clear")) {
+      // ── Local commands ──
+      if (text === "/clear" || text.startsWith("/clear ")) {
         clearMessages();
         setInput("");
         return;
       }
-      if (text === "/status" || text.startsWith("/status")) {
+      if (text === "/status" || text.startsWith("/status ")) {
         sendMessage({ type: "get_status" });
         setInput("");
         return;
       }
-      if (text === "/model" || text.startsWith("/model")) {
+      if (text === "/model" || text.startsWith("/model ")) {
         sendMessage({ type: "get_status" });
         setInput("");
         return;
       }
-      if (text === "/help" || text.startsWith("/help")) {
+      if (text === "/help" || text.startsWith("/help ")) {
         const helpText = COMMANDS.map((c) => `${c.cmd.padEnd(14)} ${c.desc}`).join("\n");
         sendMessage({ type: "prompt", text: `Available commands:\n${helpText}`, request_id: id });
         setInput("");
         return;
       }
+      if (text === "/new") {
+        const newId = `local-${Date.now()}`;
+        ensureSession(newId, "New session");
+        setInput("");
+        return;
+      }
+      if (text === "/sessions" || text.startsWith("/sessions ")) {
+        const list = sessions.length === 0
+          ? "No saved sessions."
+          : sessions
+              .slice()
+              .reverse()
+              .map((s, i) => {
+                const marker = s.id === activeSessionId ? " *" : "  ";
+                const idx = sessions.length - 1 - i;
+                return `${marker}[${idx}] ${s.name}  ·  ${s.messageCount} msgs  ·  ${s.created.slice(0, 10)}`;
+              })
+              .join("\n");
+        sendMessage({ type: "prompt", text: `Sessions:\n${list}`, request_id: id });
+        setInput("");
+        return;
+      }
+      if (text.startsWith("/resume ")) {
+        const arg = text.slice(8).trim();
+        const byIndex = /^\d+$/.test(arg);
+        const ses = byIndex
+          ? sessions[sessions.length - 1 - parseInt(arg, 10)]
+          : sessions.find((s) => s.id === arg || s.id.startsWith(arg));
+        if (ses) {
+          switchSession(ses.id);
+        } else {
+          sendMessage({ type: "prompt", text: `Session not found: ${arg}`, request_id: id });
+        }
+        setInput("");
+        return;
+      }
+      if (text.startsWith("/rename ")) {
+        const name = text.slice(8).trim();
+        if (name && activeSessionId) {
+          renameSession(activeSessionId, name);
+        }
+        setInput("");
+        return;
+      }
     }
 
+    setLastPromptText(text);
     sendMessage({ type: "prompt", text, request_id: id });
     setInput("");
-  }, [input, sendMessage, clearMessages]);
+  }, [input, sendMessage, clearMessages, sessions, activeSessionId, ensureSession, switchSession, renameSession, setLastPromptText]);
 
   const handleConnect = useCallback(() => {
     if (backendUrl && token) connect();
@@ -171,6 +229,8 @@ function RemoteControlApp() {
     [sendMessage, pendingConfirmation, setPendingConfirmation]
   );
 
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const sessionName = activeSession?.name ?? "";
   const projectName = "claude";
 
   return (
@@ -249,6 +309,9 @@ function RemoteControlApp() {
               ? "◌ connecting…"
               : "○ disconnected"}
         </Text>
+        {sessionName ? (
+          <Text style={S.sessionName} numberOfLines={1}>{sessionName}</Text>
+        ) : null}
         {connectionStatus === "connecting" && (
           <Text style={S.statusDetail}>WebSocket handshake to {backendUrl}</Text>
         )}
@@ -393,7 +456,7 @@ function msgStyle(m: { type: string; isError?: boolean }): object {
     case "term":
       return { ...base, color: "#c9d1d9" };
     case "system":
-      return { ...base, color: "#58a6ff", fontWeight: "600" as const };
+      return { ...base, color: "#8b949e", fontStyle: "italic" as const, fontSize: 12 };
     case "thinking":
       return { ...base, color: "#484f58", fontStyle: "italic" as const };
     case "tool_use":
@@ -515,6 +578,13 @@ const S = StyleSheet.create({
     fontFamily: "monospace",
     fontSize: 12,
     fontWeight: "600",
+  },
+  sessionName: {
+    color: "#8b949e",
+    fontFamily: "monospace",
+    fontSize: 11,
+    flex: 1,
+    textAlign: "right",
   },
   statusDetail: {
     color: "#8b949e",

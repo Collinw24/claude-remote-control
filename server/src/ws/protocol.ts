@@ -78,6 +78,7 @@ export interface RunStartedMessage {
   type: "run_started";
   request_id: string;
   run_id: string;
+  session_id: string;
   timestamp: string;
 }
 

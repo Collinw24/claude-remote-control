@@ -1,3 +1,46 @@
+## v1.0.4-alpha - Sessions as first-class objects
+
+### Server
+- Pass `--session-id <runId>` to Claude Code so the on-disk `.jsonl` filename
+  matches the mobile session ID. Desktop `claude --resume <id>` works with the
+  same UUID.
+- Generate a persistent server session UUID (once at startup) instead of
+  a fresh UUID per `auth_ok`. Reconnects no longer appear as new sessions.
+- Include `session_id` in `run_started` messages for client-side grouping.
+
+### Mobile
+- **Sessions are now first-class objects** mirroring desktop's `sessions-index.json`:
+  `SessionRecord` with `id`, `name` (auto-derived from first prompt), `summary`,
+  `firstPrompt`, `messageCount`, `created`/`modified` timestamps, and `messages`.
+- Store refactored: `sessions[]` array replaces the flat `messages[]` list.
+  `activeSessionId` tracks which session is displayed. All persisted to AsyncStorage
+  (capped at 50 sessions, 200 messages each).
+- **Run lifecycle events produce visible log entries:**
+  - `▸ Run started` (system) on `run_started`
+  - `▾ Run completed · N turns · X.Xs` (system) on `run_completed`
+  - `◼ Run stopped (reason)` (system) on `run_stopped`
+  - `✗ Run failed: error` (error) on `run_failed`
+- **New session commands** mirroring desktop Claude Code:
+  - `/new` — create a fresh session
+  - `/sessions` — list past sessions with name, message count, date
+  - `/resume <index|id>` — switch to a different session
+  - `/rename <name>` — rename the active session
+  - `/clear` — unchanged, clears active session only
+- Session name shown in the status bar.
+- Server session change detected on reconnect; boundary marker injected.
+- "Thinking…" placeholder removed — run lifecycle messages now provide the structure.
+- System messages rendered in muted gray italic.
+
+### Build
+```bash
+cd mobile/android
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+```
+
+APK: `mobile/android/app/build/outputs/apk/release/app-release.apk`
+
+---
+
 ## v1.0.3-alpha - Session persistence & conversation caching
 
 ### Server

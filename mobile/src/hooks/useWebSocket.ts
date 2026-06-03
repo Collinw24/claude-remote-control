@@ -46,6 +46,8 @@ export function useWebSocket() {
   const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
   const thinkingIdRef = useRef<string | null>(null);
+  const serverSessionRef = useRef<string | null>(null);
+  const currentRunIdRef = useRef<string | null>(null);
   const lastMessageTime = useRef(now());
   const heartbeatCount = useRef(0);
   const lastHbSent = useRef(0);
@@ -66,6 +68,9 @@ export function useWebSocket() {
     removeMessage,
     setPendingConfirmation,
     setSendMessage,
+    ensureSession,
+    completeSession,
+    lastPromptText,
   } = useAppStore();
 
   // ── Visible UI message (only for important events) ──
@@ -120,6 +125,14 @@ export function useWebSocket() {
       switch (data.type) {
         case "auth_ok":
           diag(`AUTH OK · session=${data.session.slice(0, 8)}… · model=${data.model}`);
+          // Detect server session change across reconnects
+          if (
+            serverSessionRef.current &&
+            serverSessionRef.current !== data.session
+          ) {
+            uiMsg("── New server session ──");
+          }
+          serverSessionRef.current = data.session;
           setConnectionStatus("connected");
           setServerModel(data.model);
           setSendMessage(sendJson);
@@ -133,18 +146,13 @@ export function useWebSocket() {
           setConnectionStatus("disconnected");
           break;
 
-        case "term": {
-          if (thinkingIdRef.current && data.text.trim().length > 0) {
-            removeMessage(thinkingIdRef.current);
-            thinkingIdRef.current = null;
-          }
+        case "term":
           addMessage({
             timestamp: new Date().toISOString(),
             type: "term",
             content: data.text,
           });
           break;
-        }
 
         case "status":
           heartbeatCount.current++;
@@ -155,21 +163,21 @@ export function useWebSocket() {
             });
             setRunStatus(synced.runStatus);
             setRunId(synced.runId);
-            if (!data.running && thinkingIdRef.current) {
-              removeMessage(thinkingIdRef.current);
-              thinkingIdRef.current = null;
-            }
           }
           break;
 
         case "run_started":
           setRunStatus("running");
           setRunId(data.run_id);
-          diag(`RUN STARTED · ${data.run_id.slice(0, 8)}…`);
-          thinkingIdRef.current = addMessage({
+          currentRunIdRef.current = data.run_id;
+          diag(`RUN STARTED · ${data.run_id.slice(0, 8)}… · session=${data.session_id.slice(0, 8)}…`);
+          // Ensure a session record exists (auto-named from the last prompt text)
+          ensureSession(data.run_id, lastPromptText || "Untitled");
+          // Log the run start as a visible system message
+          addMessage({
             timestamp: new Date().toISOString(),
-            type: "thinking",
-            content: "Thinking…",
+            type: "system",
+            content: "▸ Run started",
           });
           break;
 
@@ -193,31 +201,46 @@ export function useWebSocket() {
           });
           break;
 
-        case "run_completed":
+        case "run_completed": {
           setRunStatus("completed");
           setRunId(null);
-          if (thinkingIdRef.current) {
-            removeMessage(thinkingIdRef.current);
-            thinkingIdRef.current = null;
+          const runId = currentRunIdRef.current;
+          currentRunIdRef.current = null;
+          const durationSec = (data.duration_ms / 1000).toFixed(1);
+          const turns = data.num_turns ? `${data.num_turns} turns · ` : "";
+          const summary = `Completed in ${durationSec}s`;
+          if (runId) {
+            completeSession(runId, summary);
           }
+          addMessage({
+            timestamp: new Date().toISOString(),
+            type: "system",
+            content: `▾ Run completed · ${turns}${durationSec}s`,
+          });
           break;
+        }
 
         case "run_stopped":
           setRunStatus("stopped");
           setRunId(null);
-          if (thinkingIdRef.current) {
-            removeMessage(thinkingIdRef.current);
-            thinkingIdRef.current = null;
-          }
+          currentRunIdRef.current = null;
+          addMessage({
+            timestamp: new Date().toISOString(),
+            type: "system",
+            content: `◼ Run stopped (${data.reason})`,
+          });
           break;
 
         case "run_failed":
           setRunStatus("failed");
           setRunId(null);
-          if (thinkingIdRef.current) {
-            removeMessage(thinkingIdRef.current);
-            thinkingIdRef.current = null;
-          }
+          currentRunIdRef.current = null;
+          addMessage({
+            timestamp: new Date().toISOString(),
+            type: "error",
+            content: `✗ Run failed: ${data.error}`,
+            isError: true,
+          });
           break;
 
         case "confirmation_required":
@@ -245,7 +268,7 @@ export function useWebSocket() {
           diag(`<< UNKNOWN type="${(data as any).type}" · ${raw.slice(0, 120)}`);
       }
     },
-    [uiMsg, setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, removeMessage, setPendingConfirmation, setSendMessage, sendJson]
+    [uiMsg, setConnectionStatus, setRunStatus, setRunId, setServerModel, addMessage, setPendingConfirmation, setSendMessage, sendJson, ensureSession, completeSession, lastPromptText]
   );
 
   // ── Heartbeat / Pong (console-only logging) ──

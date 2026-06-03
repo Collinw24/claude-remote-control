@@ -27,6 +27,7 @@ export interface RunStartedMessage {
   type: "run_started";
   request_id: string;
   run_id: string;
+  session_id: string;
   timestamp: string;
 }
 
@@ -167,4 +168,18 @@ export interface LogEntry {
   content: string;
   toolName?: string;
   isError?: boolean;
+  sessionId?: string;
+}
+
+/** Mirror of desktop Claude Code's sessions-index entry.
+ *  Each session represents one Claude conversation. */
+export interface SessionRecord {
+  id: string;            // run_id from run_started (matches Claude --session-id)
+  name: string;          // auto-derived from first prompt text
+  summary: string;       // updated on run_completed
+  firstPrompt: string;   // the user's first message in this session
+  messageCount: number;
+  created: string;       // ISO timestamp
+  modified: string;      // ISO timestamp
+  messages: LogEntry[];  // capped at 200 per session
 }

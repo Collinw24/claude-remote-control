@@ -34,6 +34,7 @@ interface ClientState extends TermBufferState {
 
 const clients = new Map<WebSocket, ClientState>();
 const session = createClientState();
+const serverSessionId = uuidv4();
 let activeWs: WebSocket | null = null;
 
 export function getActiveClientCount(): number {
@@ -114,6 +115,7 @@ function replaySession(ws: WebSocket, state: ClientState): void {
       type: "run_started",
       request_id: state.currentRequestId,
       run_id: state.currentRunId,
+      session_id: serverSessionId,
       timestamp: new Date().toISOString(),
     });
     send(ws, { type: "term", text: "\nReattached to running Claude session.\n" });
@@ -158,9 +160,9 @@ function runClaude(state: ClientState, prompt: string, requestId: string): void 
   logger.info("Launching Claude", { runId, requestId, prompt: prompt.slice(0, 200) });
 
   sendActiveTerm(state, `\x1b[1m> ${prompt}\x1b[0m\n`);
-  sendActive({ type: "run_started", request_id: requestId, run_id: runId, timestamp: new Date().toISOString() });
+  sendActive({ type: "run_started", request_id: requestId, run_id: runId, session_id: serverSessionId, timestamp: new Date().toISOString() });
 
-  const child = spawnClaude(prompt);
+  const child = spawnClaude(prompt, runId);
   state.currentProcess = child;
 
   if (child.stdout) {
@@ -361,7 +363,7 @@ export function handleConnection(ws: WebSocket): void {
         authenticated = true;
         attachClient(ws, state);
         logger.info("Client authenticated");
-        send(ws, { type: "auth_ok", session: uuidv4(), server_version: "1.0.0", model: appConfig.model });
+        send(ws, { type: "auth_ok", session: serverSessionId, server_version: "1.0.0", model: appConfig.model });
         send(ws, { type: "term", text: `\x1b[1mConnected\x1b[0m  model: ${appConfig.model}  cwd: ${appConfig.projectDir}\n\n` });
         replaySession(ws, state);
       } else {

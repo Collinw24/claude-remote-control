@@ -6,9 +6,10 @@ import { logger } from "../logger.js";
  * Spawn Claude Code in headless text mode.
  * Raw stdout is streamed directly to the client as terminal output.
  */
-export function spawnClaude(prompt: string): ChildProcess {
+export function spawnClaude(prompt: string, sessionId: string): ChildProcess {
   const args = [
     "-p", prompt,
+    "--session-id", sessionId,
     "--dangerously-skip-permissions",
     "--allowedTools",
     [
