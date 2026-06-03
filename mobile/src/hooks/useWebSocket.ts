@@ -3,6 +3,12 @@ import { Platform, AppState, Dimensions } from "react-native";
 import { useAppStore } from "../state/store";
 import type { ServerMessage } from "../types";
 import { normalizeBackendUrl, validateBackendUrl } from "../utils/connection";
+import {
+  getCloseCodeLabel,
+  shouldReconnectAfterClose,
+  shouldReportConnectionLoss,
+  shouldUpdateConnectionStateAfterClose,
+} from "../utils/websocketLifecycle";
 
 const HEARTBEAT_INTERVAL = 15_000;
 const PONG_TIMEOUT = 45_000;
@@ -45,6 +51,7 @@ export function useWebSocket() {
   const msgCount = useRef(0);
   const bytesReceived = useRef(0);
   const connectRef = useRef<() => void>(() => {});
+  const replacedSockets = useRef(new WeakSet<WebSocket>());
 
   const {
     backendUrl,
@@ -291,6 +298,7 @@ export function useWebSocket() {
     const prev = wsRef.current;
     if (prev) {
       diag(`CONNECT · replacing ws=${WS_STATE[prev.readyState]}`);
+      replacedSockets.current.add(prev);
       prev.close();
     }
 
@@ -340,21 +348,21 @@ export function useWebSocket() {
 
       ws.onclose = (event) => {
         const { code, reason, wasClean } = event as CloseEvent;
-        const codeLabel =
-          code === 1000 ? "NORMAL" :
-          code === 1001 ? "GOING_AWAY" :
-          code === 1005 ? "NO_STATUS" :
-          code === 1006 ? "ABNORMAL" :
-          `code_${code}`;
+        const replaced = replacedSockets.current.has(ws);
+        const codeLabel = getCloseCodeLabel(code);
+        const closeDecision = { code, intentional: intentionalClose.current, replaced };
 
         diag(`WS CLOSE · ${codeLabel} · clean=${wasClean}` + (reason ? ` · reason=${reason}` : ""));
 
-        if (!intentionalClose.current) {
+        if (shouldReportConnectionLoss(closeDecision)) {
           uiMsg(`Connection lost (${codeLabel})`, "error");
         }
 
-        doDisconnect(false, `ws.onclose ${codeLabel}`);
-        if (!intentionalClose.current) {
+        if (shouldUpdateConnectionStateAfterClose(closeDecision)) {
+          doDisconnect(false, `ws.onclose ${codeLabel}`);
+        }
+
+        if (shouldReconnectAfterClose(closeDecision)) {
           scheduleReconnect();
         }
       };
