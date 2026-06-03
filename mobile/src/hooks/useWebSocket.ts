@@ -9,6 +9,7 @@ import {
   shouldReportConnectionLoss,
   shouldUpdateConnectionStateAfterClose,
 } from "../utils/websocketLifecycle";
+import { getRunStatusFromServerStatus } from "../utils/runStatusSync";
 
 const HEARTBEAT_INTERVAL = 15_000;
 const PONG_TIMEOUT = 45_000;
@@ -123,6 +124,7 @@ export function useWebSocket() {
           setServerModel(data.model);
           setSendMessage(sendJson);
           reconnectAttempts.current = 0;
+          sendJson({ type: "get_status" });
           break;
 
         case "auth_error":
@@ -146,6 +148,18 @@ export function useWebSocket() {
 
         case "status":
           heartbeatCount.current++;
+          {
+            const synced = getRunStatusFromServerStatus({
+              running: data.running,
+              runId: data.run_id,
+            });
+            setRunStatus(synced.runStatus);
+            setRunId(synced.runId);
+            if (!data.running && thinkingIdRef.current) {
+              removeMessage(thinkingIdRef.current);
+              thinkingIdRef.current = null;
+            }
+          }
           break;
 
         case "run_started":
