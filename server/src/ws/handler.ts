@@ -11,8 +11,6 @@ import { runRevert } from "../quick-actions/revert.js";
 import type { ChildProcess } from "child_process";
 import {
   appendBufferedTerm,
-  getDisconnectAction,
-  REATTACH_GRACE_MS,
   type TermBufferState,
 } from "./sessionLifecycle.js";
 
@@ -29,7 +27,8 @@ interface ClientState extends TermBufferState {
   runStartedAt: number | null;
   pendingConfirmation: PendingConfirmation | null;
   lastError: string | null;
-  detachedStopTimer: ReturnType<typeof setTimeout> | null;
+  /** Persistent Claude session ID — generated once so conversation history is preserved across prompts. */
+  claudeSessionId: string | null;
 }
 
 const clients = new Map<WebSocket, ClientState>();
@@ -49,7 +48,7 @@ function createClientState(): ClientState {
     runStartedAt: null,
     pendingConfirmation: null,
     lastError: null,
-    detachedStopTimer: null,
+    claudeSessionId: null,
     termBuffer: [],
     termBufferChars: 0,
   };
@@ -80,33 +79,19 @@ function sendActiveError(message: string): void {
   sendActive({ type: "server_error", message });
 }
 
-function clearDetachTimer(state: ClientState): void {
-  if (state.detachedStopTimer) {
-    clearTimeout(state.detachedStopTimer);
-    state.detachedStopTimer = null;
-  }
-}
-
-function scheduleDetachedStop(state: ClientState): void {
-  clearDetachTimer(state);
-  state.detachedStopTimer = setTimeout(() => {
-    if (!activeWs && state.currentProcess) {
-      logger.warn("Stopping detached run after reattach grace expired", {
-        runId: state.currentRunId,
-        graceMs: REATTACH_GRACE_MS,
-      });
-      stopCurrentRun(state, "user_requested");
-    }
-  }, REATTACH_GRACE_MS);
-}
-
 function attachClient(ws: WebSocket, state: ClientState): void {
   if (activeWs && activeWs !== ws && activeWs.readyState === WebSocket.OPEN) {
     activeWs.close(1000, "Replaced by new authenticated client");
   }
 
   activeWs = ws;
-  clearDetachTimer(state);
+
+  // Generate persistent Claude session ID on first connect so conversation
+  // history is preserved across prompts for the lifetime of this connection.
+  if (!state.claudeSessionId) {
+    state.claudeSessionId = uuidv4();
+    logger.info("Created persistent Claude session", { sessionId: state.claudeSessionId });
+  }
 }
 
 function replaySession(ws: WebSocket, state: ClientState): void {
@@ -129,7 +114,6 @@ function replaySession(ws: WebSocket, state: ClientState): void {
 }
 
 function cleanupDisconnectedState(state: ClientState): void {
-  clearDetachTimer(state);
   if (state.pendingConfirmation) {
     clearTimeout(state.pendingConfirmation.timer);
     state.pendingConfirmation.resolve(false);
@@ -149,20 +133,23 @@ function stopCurrentRun(state: ClientState, reason: "user_requested" | "guardrai
 function runClaude(state: ClientState, prompt: string, requestId: string): void {
   stopCurrentRun(state, "user_requested");
 
-  const runId = uuidv4();
-  state.currentRunId = runId;
+  // Use the persistent Claude session ID so conversation history is preserved
+  // across prompts. Falls back to a fresh UUID if no session exists yet.
+  const sessionId = state.claudeSessionId || uuidv4();
+  state.claudeSessionId = sessionId;
+  state.currentRunId = sessionId;
   state.currentRequestId = requestId;
   state.runStartedAt = Date.now();
   state.lastError = null;
   state.termBuffer = [];
   state.termBufferChars = 0;
 
-  logger.info("Launching Claude", { runId, requestId, prompt: prompt.slice(0, 200) });
+  logger.info("Launching Claude", { sessionId, requestId, prompt: prompt.slice(0, 200) });
 
   sendActiveTerm(state, `\x1b[1m> ${prompt}\x1b[0m\n`);
-  sendActive({ type: "run_started", request_id: requestId, run_id: runId, session_id: serverSessionId, timestamp: new Date().toISOString() });
+  sendActive({ type: "run_started", request_id: requestId, run_id: sessionId, session_id: serverSessionId, timestamp: new Date().toISOString() });
 
-  const child = spawnClaude(prompt, runId);
+  const child = spawnClaude(prompt, sessionId);
   state.currentProcess = child;
 
   if (child.stdout) {
@@ -185,18 +172,18 @@ function runClaude(state: ClientState, prompt: string, requestId: string): void 
     state.runStartedAt = null;
 
     if (code === 0 || code === null) {
-      logger.info("Run completed", { runId, requestId, durationMs: duration });
+      logger.info("Run completed", { sessionId, requestId, durationMs: duration });
       sendActiveTerm(state, `\nCompleted in ${(duration / 1000).toFixed(1)}s\n`);
       sendActive({ type: "run_completed", request_id: requestId, result: "", num_turns: 0, duration_ms: duration, usage: {} });
     } else {
-      logger.error("Run failed", { runId, requestId, exitCode: code, durationMs: duration });
+      logger.error("Run failed", { sessionId, requestId, exitCode: code, durationMs: duration });
       sendActiveTerm(state, `\nExited with code ${code}\n`);
       sendActive({ type: "run_failed", request_id: requestId, error: `Exit code ${code}`, code: `EXIT_${code}` });
     }
   });
 
   child.on("error", (err) => {
-    logger.error("Spawn error", { runId, error: err.message });
+    logger.error("Spawn error", { sessionId, error: err.message });
     if (state.currentProcess === child) {
       state.currentProcess = null;
       state.currentRunId = null;
@@ -423,16 +410,13 @@ export function handleConnection(ws: WebSocket): void {
     clients.delete(ws);
     if (activeWs === ws) {
       activeWs = null;
-      const action = getDisconnectAction({ hasCurrentProcess: !!state.currentProcess });
-      if (action === "detach") {
-        logger.warn("Client disconnected during active run; waiting for reattach", {
+      if (state.currentProcess) {
+        logger.info("Client disconnected during active run; stopping", {
           runId: state.currentRunId,
-          graceMs: REATTACH_GRACE_MS,
         });
-        scheduleDetachedStop(state);
-      } else {
-        cleanupDisconnectedState(state);
+        stopCurrentRun(state, "user_requested");
       }
+      cleanupDisconnectedState(state);
     }
     logger.info("Client disconnected", { total: clients.size });
   });

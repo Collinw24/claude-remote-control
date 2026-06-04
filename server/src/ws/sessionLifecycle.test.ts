@@ -2,17 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendBufferedTerm,
-  getDisconnectAction,
   type TermBufferState,
 } from "./sessionLifecycle.js";
-
-test("keeps an active run alive when the websocket disconnects", () => {
-  assert.equal(getDisconnectAction({ hasCurrentProcess: true }), "detach");
-});
-
-test("cleans up immediately when no run is active", () => {
-  assert.equal(getDisconnectAction({ hasCurrentProcess: false }), "cleanup");
-});
 
 test("keeps only the newest terminal output within the replay buffer", () => {
   const state: TermBufferState = { termBuffer: [], termBufferChars: 0 };

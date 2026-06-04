@@ -1,13 +1,8 @@
-export const REATTACH_GRACE_MS = 5 * 60_000;
 export const TERM_BUFFER_MAX_CHARS = 200_000;
 
 export interface TermBufferState {
   termBuffer: string[];
   termBufferChars: number;
-}
-
-export function getDisconnectAction({ hasCurrentProcess }: { hasCurrentProcess: boolean }): "detach" | "cleanup" {
-  return hasCurrentProcess ? "detach" : "cleanup";
 }
 
 export function appendBufferedTerm(
