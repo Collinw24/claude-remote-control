@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { appConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { parseClientMessage, ServerMessage } from "./protocol.js";
-import { spawnClaude, stopRun as killClaude } from "../claude/spawn.js";
+import { spawnClaude, stopRun } from "../claude/spawn.js";
 import { scanPrompt } from "../claude/guardrails.js";
 import { runGitDiff } from "../quick-actions/git-diff.js";
 import { runCommit } from "../quick-actions/commit.js";
@@ -11,8 +11,11 @@ import { runRevert } from "../quick-actions/revert.js";
 import type { ChildProcess } from "child_process";
 import {
   appendBufferedTerm,
+  TERM_BUFFER_MAX_CHARS,
   type TermBufferState,
 } from "./sessionLifecycle.js";
+
+const CONFIRMATION_TIMEOUT_MS = 60_000;
 
 interface PendingConfirmation {
   actionId: string;
@@ -27,7 +30,6 @@ interface ClientState extends TermBufferState {
   runStartedAt: number | null;
   pendingConfirmation: PendingConfirmation | null;
   lastError: string | null;
-  /** Persistent Claude session ID — generated once so conversation history is preserved across prompts. */
   claudeSessionId: string | null;
 }
 
@@ -86,11 +88,9 @@ function attachClient(ws: WebSocket, state: ClientState): void {
 
   activeWs = ws;
 
-  // Generate persistent Claude session ID on first connect so conversation
-  // history is preserved across prompts for the lifetime of this connection.
   if (!state.claudeSessionId) {
     state.claudeSessionId = uuidv4();
-    logger.info("Created persistent Claude session", { sessionId: state.claudeSessionId });
+    logger.info("Created Claude session", { sessionId: state.claudeSessionId });
   }
 }
 
@@ -113,7 +113,7 @@ function replaySession(ws: WebSocket, state: ClientState): void {
   state.termBufferChars = 0;
 }
 
-function cleanupDisconnectedState(state: ClientState): void {
+function cleanupPendingConfirmation(state: ClientState): void {
   if (state.pendingConfirmation) {
     clearTimeout(state.pendingConfirmation.timer);
     state.pendingConfirmation.resolve(false);
@@ -121,20 +121,22 @@ function cleanupDisconnectedState(state: ClientState): void {
   }
 }
 
-function stopCurrentRun(state: ClientState, reason: "user_requested" | "guardrails"): void {
-  if (!state.currentProcess) return;
+function killRun(state: ClientState, reason: "user_requested" | "guardrails"): void {
+  const proc = state.currentProcess;
+  if (!proc) return;
   logger.info("Stopping run", { runId: state.currentRunId, reason });
-  killClaude(state.currentProcess);
+  stopRun(proc);
   state.currentProcess = null;
   state.currentRunId = null;
+  state.currentRequestId = null;
   state.runStartedAt = null;
 }
 
 function runClaude(state: ClientState, prompt: string, requestId: string): void {
-  stopCurrentRun(state, "user_requested");
+  if (state.currentProcess) {
+    killRun(state, "user_requested");
+  }
 
-  // Use the persistent Claude session ID so conversation history is preserved
-  // across prompts. Falls back to a fresh UUID if no session exists yet.
   const sessionId = state.claudeSessionId || uuidv4();
   state.claudeSessionId = sessionId;
   state.currentRunId = sessionId;
@@ -160,16 +162,23 @@ function runClaude(state: ClientState, prompt: string, requestId: string): void 
 
   if (child.stderr) {
     child.stderr.on("data", (chunk: Buffer) => {
-      state.lastError = chunk.toString();
-      sendActiveTerm(state, `\x1b[2m${chunk.toString()}\x1b[0m`);
+      const text = chunk.toString();
+      state.lastError = (state.lastError || "") + text;
+      if (state.lastError.length > TERM_BUFFER_MAX_CHARS / 2) {
+        state.lastError = state.lastError.slice(-TERM_BUFFER_MAX_CHARS / 2);
+      }
+      sendActiveTerm(state, `\x1b[2m${text}\x1b[0m`);
     });
   }
 
   child.on("exit", (code) => {
     const duration = state.runStartedAt ? Date.now() - state.runStartedAt : 0;
-    state.currentProcess = null;
-    state.currentRunId = null;
-    state.runStartedAt = null;
+    if (state.currentProcess === child) {
+      state.currentProcess = null;
+      state.currentRunId = null;
+      state.currentRequestId = null;
+      state.runStartedAt = null;
+    }
 
     if (code === 0 || code === null) {
       logger.info("Run completed", { sessionId, requestId, durationMs: duration });
@@ -187,6 +196,7 @@ function runClaude(state: ClientState, prompt: string, requestId: string): void 
     if (state.currentProcess === child) {
       state.currentProcess = null;
       state.currentRunId = null;
+      state.currentRequestId = null;
       state.runStartedAt = null;
       sendActiveTerm(state, `\nSpawn failed: ${err.message}\n`);
       sendActive({ type: "run_failed", request_id: requestId, error: err.message, code: "SPAWN_ERROR" });
@@ -224,17 +234,17 @@ async function handleQuickAction(state: ClientState, action: string, requestId: 
       }
       break;
     case "commit":
-      await handleCommitAction(state, requestId);
+      handleCommitAction(state, requestId);
       break;
     case "revert":
-      await handleRevertAction(state, requestId);
+      handleRevertAction(state, requestId);
       break;
     default:
       sendActiveError(`Unknown quick action: ${action}`);
   }
 }
 
-async function handleCommitAction(state: ClientState, requestId: string): Promise<void> {
+function handleCommitAction(state: ClientState, requestId: string): void {
   try {
     const result = await runCommit(appConfig.projectDir);
     if (result.needsConfirmation) {
@@ -248,15 +258,14 @@ async function handleCommitAction(state: ClientState, requestId: string): Promis
       });
       state.pendingConfirmation = {
         actionId,
-        resolve: async (approved: boolean) => {
+        resolve: (approved: boolean) => {
           state.pendingConfirmation = null;
           if (approved) {
-            try {
-              const r = await runCommit(appConfig.projectDir, true);
+            runCommit(appConfig.projectDir, true).then((r) => {
               sendActiveTerm(state, `\n${r.commitMessage || "Committed."}\n`);
-            } catch (err) {
+            }).catch((err) => {
               sendActiveError(`Commit failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
+            });
           } else {
             sendActiveTerm(state, "\nCommit cancelled.\n");
           }
@@ -266,7 +275,7 @@ async function handleCommitAction(state: ClientState, requestId: string): Promis
             state.pendingConfirmation.resolve(false);
             sendActiveError("Confirmation timed out.");
           }
-        }, 60_000),
+        }, CONFIRMATION_TIMEOUT_MS),
       };
     } else if (result.committed) {
       sendActiveTerm(state, `\n${result.commitMessage || "Committed."}\n`);
@@ -278,11 +287,7 @@ async function handleCommitAction(state: ClientState, requestId: string): Promis
   }
 }
 
-async function handleRevertAction(state: ClientState, requestId: string): Promise<void> {
-  if (!appConfig.allowDestructiveActions) {
-    sendActiveError("Revert disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env");
-    return;
-  }
+function handleRevertAction(state: ClientState, requestId: string): void {
   try {
     const result = await runRevert(appConfig.projectDir);
     if (result.needsConfirmation) {
@@ -294,28 +299,27 @@ async function handleRevertAction(state: ClientState, requestId: string): Promis
         prompt: "Revert all uncommitted changes?",
         details: `Files:\n${(result.files || []).join("\n")}\n\n${result.diff?.slice(0, 3000) || ""}`,
       });
-      state.pendingConfirmation = {
-        actionId,
-        resolve: async (approved: boolean) => {
-          state.pendingConfirmation = null;
-          if (approved) {
-            try {
-              const r = await runRevert(appConfig.projectDir, true);
-              sendActiveTerm(state, `\n${r.message || "Reverted."}\n`);
-            } catch (err) {
-              sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          } else {
-            sendActiveTerm(state, "\nRevert cancelled.\n");
-          }
-        },
-        timer: setTimeout(() => {
-          if (state.pendingConfirmation?.actionId === actionId) {
-            state.pendingConfirmation.resolve(false);
-            sendActiveError("Confirmation timed out.");
-          }
-        }, 60_000),
-      };
+    state.pendingConfirmation = {
+      actionId,
+      resolve: (approved: boolean) => {
+        state.pendingConfirmation = null;
+        if (approved) {
+          runRevert(appConfig.projectDir, true).then((r) => {
+            sendActiveTerm(state, `\n${r.message || "Reverted."}\n`);
+          }).catch((err) => {
+            sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        } else {
+          sendActiveTerm(state, "\nRevert cancelled.\n");
+        }
+      },
+      timer: setTimeout(() => {
+        if (state.pendingConfirmation?.actionId === actionId) {
+          state.pendingConfirmation.resolve(false);
+          sendActiveError("Confirmation timed out.");
+        }
+      }, CONFIRMATION_TIMEOUT_MS),
+    };
     }
   } catch (err) {
     sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -375,10 +379,11 @@ export function handleConnection(ws: WebSocket): void {
         runClaude(state, message.text, message.request_id);
         break;
       }
-      case "stop":
+      case "stop": {
+        const runId = state.currentRunId;
         if (state.currentProcess) {
-          stopCurrentRun(state, "user_requested");
-          sendActive({ type: "run_stopped", request_id: state.currentRequestId || "unknown", reason: "user_requested" });
+          killRun(state, "user_requested");
+          sendActive({ type: "run_stopped", request_id: runId || state.currentRequestId || "unknown", reason: "user_requested" });
           sendActiveTerm(state, "\nStopped\n");
         }
         break;
@@ -411,12 +416,11 @@ export function handleConnection(ws: WebSocket): void {
     if (activeWs === ws) {
       activeWs = null;
       if (state.currentProcess) {
-        logger.info("Client disconnected during active run; stopping", {
+        logger.info("Client disconnected during active run; run continues", {
           runId: state.currentRunId,
         });
-        stopCurrentRun(state, "user_requested");
       }
-      cleanupDisconnectedState(state);
+      cleanupPendingConfirmation(state);
     }
     logger.info("Client disconnected", { total: clients.size });
   });
