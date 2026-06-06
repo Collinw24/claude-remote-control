@@ -49,6 +49,8 @@ interface AppState {
   setRunId: (id: string | null) => void;
   serverModel: string;
   setServerModel: (model: string) => void;
+  serverVersion: string;
+  setServerVersion: (version: string) => void;
 
   // Session tracking (persisted)
   sessions: SessionRecord[];
@@ -111,6 +113,8 @@ export const useAppStore = create<AppState>()(
       setRunId: (id) => set({ runId: id }),
       serverModel: "",
       setServerModel: (model) => set({ serverModel: model }),
+      serverVersion: "",
+      setServerVersion: (version) => set({ serverVersion: version }),
 
       // Sessions
       sessions: [],

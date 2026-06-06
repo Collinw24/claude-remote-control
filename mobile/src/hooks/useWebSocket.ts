@@ -63,6 +63,7 @@ export function useWebSocket() {
     setRunStatus,
     setRunId,
     setServerModel,
+    setServerVersion,
     addMessage,
     removeMessage,
     setPendingConfirmation,
@@ -134,6 +135,7 @@ export function useWebSocket() {
           serverSessionRef.current = data.session;
           setConnectionStatus("connected");
           setServerModel(data.model);
+          setServerVersion(data.server_version);
           setSendMessage(sendJson);
           reconnectAttempts.current = 0;
           sendJson({ type: "get_status" });

@@ -15,6 +15,7 @@ import {
 import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWebSocket } from "./src/hooks/useWebSocket";
 import { useAppStore } from "./src/state/store";
+import { SettingsModal } from "./src/components/SettingsModal";
 import { getPromptBottomInset } from "./src/utils/keyboardLayout";
 
 interface Command {
@@ -62,6 +63,7 @@ function RemoteControlApp() {
   const { connect, disconnect } = useWebSocket();
   const [input, setInput] = useState("");
   const [selectedCmdIdx, setSelectedCmdIdx] = useState(0);
+  const [settingsVisible, setSettingsVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
@@ -229,6 +231,11 @@ function RemoteControlApp() {
     [sendMessage, pendingConfirmation, setPendingConfirmation]
   );
 
+  const handleReconnect = useCallback(() => {
+    disconnect();
+    setTimeout(() => connect(), 300);
+  }, [disconnect, connect]);
+
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const sessionName = activeSession?.name ?? "";
   const projectName = "claude";
@@ -251,6 +258,9 @@ function RemoteControlApp() {
         </View>
         <View style={S.headerRight}>
           {isRunning && <Text style={S.headerRunning}>⏺ running</Text>}
+          <TouchableOpacity onPress={() => setSettingsVisible(true)}>
+            <Text style={S.headerAction}>⚙</Text>
+          </TouchableOpacity>
           {!isConnected ? (
             <TouchableOpacity onPress={handleConnect}>
               <Text style={S.headerAction}>/connect</Text>
@@ -431,6 +441,12 @@ function RemoteControlApp() {
         </View>
       </View>
       </KeyboardAvoidingView>
+
+      <SettingsModal
+        visible={settingsVisible}
+        onClose={() => setSettingsVisible(false)}
+        onReconnect={handleReconnect}
+      />
     </SafeAreaView>
   );
 }
