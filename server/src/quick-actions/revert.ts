@@ -72,11 +72,13 @@ function previewRevert(projectDir: string): Promise<RevertResult> {
       });
 
       let diffOut = "";
+      let diffErr = "";
       diffChild.stdout.on("data", (chunk: Buffer) => { diffOut += chunk.toString(); });
+      diffChild.stderr.on("data", (chunk: Buffer) => { diffErr += chunk.toString(); });
 
       diffChild.on("close", (diffCode) => {
         if (diffCode !== 0 && diffCode !== null) {
-          reject(new Error(`git diff failed with code ${diffCode}`));
+          reject(new Error(diffErr || `git diff failed with code ${diffCode}`));
           return;
         }
 
@@ -94,10 +96,14 @@ function previewRevert(projectDir: string): Promise<RevertResult> {
           files,
         });
       });
+
+      diffChild.on("error", (err) => {
+        reject(new Error(`Failed to run git diff: ${err.message}`));
+      });
     });
 
     child.on("error", (err) => {
-      reject(new Error(`Failed to run git diff: ${err.message}`));
+      reject(new Error(`Failed to run git diff --stat: ${err.message}`));
     });
   });
 }

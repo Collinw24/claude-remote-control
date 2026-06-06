@@ -67,11 +67,13 @@ function previewCommit(projectDir: string): Promise<CommitResult> {
       });
 
       let diffOut = "";
+      let diffErr = "";
       diffChild.stdout.on("data", (chunk: Buffer) => { diffOut += chunk.toString(); });
+      diffChild.stderr.on("data", (chunk: Buffer) => { diffErr += chunk.toString(); });
 
       diffChild.on("close", (diffCode) => {
         if (diffCode !== 0 && diffCode !== null) {
-          reject(new Error(`git diff --cached failed with code ${diffCode}`));
+          reject(new Error(diffErr || `git diff --cached failed with code ${diffCode}`));
           return;
         }
 
@@ -89,10 +91,14 @@ function previewCommit(projectDir: string): Promise<CommitResult> {
           files,
         });
       });
+
+      diffChild.on("error", (err) => {
+        reject(new Error(`Failed to run git diff --cached: ${err.message}`));
+      });
     });
 
     child.on("error", (err) => {
-      reject(new Error(`Failed to run git diff --cached: ${err.message}`));
+      reject(new Error(`Failed to run git diff --cached --stat: ${err.message}`));
     });
   });
 }

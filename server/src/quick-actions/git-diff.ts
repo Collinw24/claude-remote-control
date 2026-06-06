@@ -48,12 +48,8 @@ export function runGitDiff(projectDir: string): Promise<GitDiffResult> {
       let diffOut = "";
       let diffErr = "";
 
-      diffChild.stdout.on("data", (chunk: Buffer) => {
-        diffOut += chunk.toString();
-      });
-      diffChild.stderr.on("data", (chunk: Buffer) => {
-        diffErr += chunk.toString();
-      });
+      diffChild.stdout.on("data", (chunk: Buffer) => { diffOut += chunk.toString(); });
+      diffChild.stderr.on("data", (chunk: Buffer) => { diffErr += chunk.toString(); });
 
       diffChild.on("close", (diffCode) => {
         if (diffCode !== 0 && diffCode !== null) {
@@ -62,7 +58,6 @@ export function runGitDiff(projectDir: string): Promise<GitDiffResult> {
         }
 
         const diff = diffOut.trim() || "No changes";
-        // Parse file list from diff
         const files: string[] = [];
         const fileRegex = /^diff --git a\/(.+) b\/(.+)$/gm;
         let match;
