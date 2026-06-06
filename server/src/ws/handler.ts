@@ -286,6 +286,10 @@ function handleCommitAction(state: ClientState, requestId: string): void {
 }
 
 function handleRevertAction(state: ClientState, requestId: string): void {
+  if (!appConfig.allowDestructiveActions) {
+    sendActiveError("Revert disabled. Set ALLOW_DESTRUCTIVE_ACTIONS=true in .env");
+    return;
+  }
   runRevert(appConfig.projectDir).then((result) => {
     if (result.needsConfirmation) {
       const actionId = uuidv4();
