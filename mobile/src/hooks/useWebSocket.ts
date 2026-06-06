@@ -45,7 +45,6 @@ export function useWebSocket() {
   const pongTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
-  const thinkingIdRef = useRef<string | null>(null);
   const serverSessionRef = useRef<string | null>(null);
   const currentRunIdRef = useRef<string | null>(null);
   const lastMessageTime = useRef(now());
@@ -336,6 +335,8 @@ export function useWebSocket() {
     if (prev) {
       diag(`CONNECT · replacing ws=${WS_STATE[prev.readyState]}`);
       replacedSockets.current.add(prev);
+      stopHeartbeat();
+      stopPongTimer();
       prev.close();
     }
 
