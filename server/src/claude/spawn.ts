@@ -42,7 +42,6 @@ export function spawnClaude(prompt: string, sessionId: string): ChildProcess {
     CLAUDE_CODE_SUBAGENT_MODEL: appConfig.smallModel,
     API_TIMEOUT_MS: "600000",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    ANTHROPIC_API_KEY: "",
   };
 
   logger.debug("Spawning Claude (text mode)", {
