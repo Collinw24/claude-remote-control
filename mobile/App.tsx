@@ -441,12 +441,11 @@ function stripAnsi(s: string): string {
 
 function mapCommand(text: string): string | null {
   const t = text.toLowerCase().trim();
-  if (t.startsWith("/diff")) return "git_diff";
-  if (t.startsWith("/commit")) return "commit";
-  if (t.startsWith("/revert")) return "revert";
-  if (t.startsWith("/tests")) return "run_tests";
-  if (t.startsWith("/explain")) return "explain_error";
-  if (t.startsWith("/continue")) return "continue";
+  for (const c of COMMANDS) {
+    if (c.type === "quick_action" && t.startsWith(c.cmd)) {
+      return c.action || null;
+    }
+  }
   return null;
 }
 

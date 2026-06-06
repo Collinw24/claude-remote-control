@@ -1,5 +1,5 @@
 export const DEFAULT_BACKEND_PORT = "3001";
-export const DEFAULT_BACKEND_URL = "ws://100.81.211.88:3001";
+export const DEFAULT_BACKEND_URL = "ws://localhost:3001";
 
 const WS_PROTOCOLS = new Set(["ws:", "wss:"]);
 
