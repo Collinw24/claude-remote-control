@@ -204,7 +204,7 @@ function runClaude(state: ClientState, prompt: string, requestId: string): void 
   });
 }
 
-async function handleQuickAction(state: ClientState, action: string, requestId: string): Promise<void> {
+function handleQuickAction(state: ClientState, action: string, requestId: string): void {
   logger.info("Quick action", { action, requestId });
 
   switch (action) {
@@ -215,12 +215,11 @@ async function handleQuickAction(state: ClientState, action: string, requestId: 
       runClaude(state, "Run the project's test suite, summarize failures, and fix them if safe.", requestId);
       break;
     case "git_diff":
-      try {
-        const diff = await runGitDiff(appConfig.projectDir);
+      runGitDiff(appConfig.projectDir).then((diff) => {
         sendActiveTerm(state, `\n${diff.stats}\n\n${diff.diff.slice(0, 8000)}\n`);
-      } catch (err) {
+      }).catch((err) => {
         sendActiveError(`Git diff failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      });
       break;
     case "explain_error":
       if (!state.lastError) {
@@ -245,8 +244,7 @@ async function handleQuickAction(state: ClientState, action: string, requestId: 
 }
 
 function handleCommitAction(state: ClientState, requestId: string): void {
-  try {
-    const result = await runCommit(appConfig.projectDir);
+  runCommit(appConfig.projectDir).then((result) => {
     if (result.needsConfirmation) {
       const actionId = uuidv4();
       sendActive({
@@ -282,14 +280,13 @@ function handleCommitAction(state: ClientState, requestId: string): void {
     } else {
       sendActiveError(result.error || "Nothing to commit.");
     }
-  } catch (err) {
+  }).catch((err) => {
     sendActiveError(`Commit failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  });
 }
 
 function handleRevertAction(state: ClientState, requestId: string): void {
-  try {
-    const result = await runRevert(appConfig.projectDir);
+  runRevert(appConfig.projectDir).then((result) => {
     if (result.needsConfirmation) {
       const actionId = uuidv4();
       sendActive({
@@ -299,31 +296,31 @@ function handleRevertAction(state: ClientState, requestId: string): void {
         prompt: "Revert all uncommitted changes?",
         details: `Files:\n${(result.files || []).join("\n")}\n\n${result.diff?.slice(0, 3000) || ""}`,
       });
-    state.pendingConfirmation = {
-      actionId,
-      resolve: (approved: boolean) => {
-        state.pendingConfirmation = null;
-        if (approved) {
-          runRevert(appConfig.projectDir, true).then((r) => {
-            sendActiveTerm(state, `\n${r.message || "Reverted."}\n`);
-          }).catch((err) => {
-            sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
-          });
-        } else {
-          sendActiveTerm(state, "\nRevert cancelled.\n");
-        }
-      },
-      timer: setTimeout(() => {
-        if (state.pendingConfirmation?.actionId === actionId) {
-          state.pendingConfirmation.resolve(false);
-          sendActiveError("Confirmation timed out.");
-        }
-      }, CONFIRMATION_TIMEOUT_MS),
-    };
+      state.pendingConfirmation = {
+        actionId,
+        resolve: (approved: boolean) => {
+          state.pendingConfirmation = null;
+          if (approved) {
+            runRevert(appConfig.projectDir, true).then((r) => {
+              sendActiveTerm(state, `\n${r.message || "Reverted."}\n`);
+            }).catch((err) => {
+              sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          } else {
+            sendActiveTerm(state, "\nRevert cancelled.\n");
+          }
+        },
+        timer: setTimeout(() => {
+          if (state.pendingConfirmation?.actionId === actionId) {
+            state.pendingConfirmation.resolve(false);
+            sendActiveError("Confirmation timed out.");
+          }
+        }, CONFIRMATION_TIMEOUT_MS),
+      };
     }
-  } catch (err) {
+  }).catch((err) => {
     sendActiveError(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  });
 }
 
 export function handleConnection(ws: WebSocket): void {
@@ -387,6 +384,7 @@ export function handleConnection(ws: WebSocket): void {
           sendActiveTerm(state, "\nStopped\n");
         }
         break;
+      }
       case "quick_action":
         handleQuickAction(state, message.action, message.request_id);
         break;
